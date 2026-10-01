@@ -167,6 +167,32 @@ def is_fastembed_model(model_name: str) -> bool:
     return any(entry["model"] == model_name for entry in TextEmbedding.list_supported_models())
 
 
+def plan_attempts(backend: str, model_name: str) -> list[tuple[str, str]]:
+    """Ordonne les couples (moteur, modèle) à essayer, du préféré au repli.
+
+    Fonction pure : elle n'instancie rien, ce qui la rend testable hors ligne.
+    """
+    backend = (backend or "auto").lower()
+    if backend == "none":
+        return []
+    if backend == "model2vec":
+        return [("model2vec", model_name or DEFAULT_MODEL2VEC_MODEL)]
+    if backend == "fastembed":
+        return [
+            ("fastembed", model_name or DEFAULT_FASTEMBED_MODEL),
+            ("model2vec", DEFAULT_MODEL2VEC_MODEL),
+        ]
+    # « auto » : normalement le profil matériel a déjà tranché (cf.
+    # services.build_context). En dernier recours, on privilégie le moteur le
+    # plus léger — certains modèles (potion) figurent dans les deux catalogues,
+    # et la variante statique est bien plus rapide sans AVX.
+    attempts = [("model2vec", model_name or DEFAULT_MODEL2VEC_MODEL)]
+    if model_name and is_fastembed_model(model_name):
+        attempts.append(("fastembed", model_name))
+    attempts.append(("model2vec", DEFAULT_MODEL2VEC_MODEL))
+    return attempts
+
+
 def build_embedder(
     backend: str,
     model_name: str,
@@ -175,37 +201,25 @@ def build_embedder(
     threads: int = 0,
 ) -> Embedder:
     """Instancie le moteur demandé, avec repli progressif en cas d'échec."""
-    backend = (backend or "auto").lower()
-    if backend == "none":
+    if (backend or "auto").lower() == "none":
         return NullEmbedder("désactivé par configuration")
 
-    attempts: list[tuple[str, str]] = []
-    if backend == "model2vec":
-        attempts = [("model2vec", model_name or DEFAULT_MODEL2VEC_MODEL)]
-    elif backend == "fastembed":
-        attempts = [
-            ("fastembed", model_name or DEFAULT_FASTEMBED_MODEL),
-            ("model2vec", DEFAULT_MODEL2VEC_MODEL),
-        ]
-    else:
-        # « auto » : normalement le profil matériel a déjà tranché (cf.
-        # services.build_context). En dernier recours, on privilégie le moteur
-        # le plus léger — certains modèles (potion) figurent dans les deux
-        # catalogues, et la variante statique est bien plus rapide sans AVX.
-        attempts = [("model2vec", model_name or DEFAULT_MODEL2VEC_MODEL)]
-        if model_name and is_fastembed_model(model_name):
-            attempts.append(("fastembed", model_name))
-        attempts.append(("model2vec", DEFAULT_MODEL2VEC_MODEL))
-
     errors: list[str] = []
-    for engine, name in attempts:
+    seen: set[tuple[str, str]] = set()
+    for engine, name in plan_attempts(backend, model_name):
+        if (engine, name) in seen:
+            continue
+        seen.add((engine, name))
         try:
             if engine == "model2vec":
                 embedder = Model2VecEmbedder(name, cache_dir=cache_dir)
             else:
                 embedder = FastEmbedEmbedder(name, cache_dir=cache_dir, threads=threads)
             logger.info(
-                "Embeddings : %s / %s (dimension %d)", engine, embedder.model_name, embedder.dimension
+                "Embeddings : %s / %s (dimension %d)",
+                engine,
+                embedder.model_name,
+                embedder.dimension,
             )
             return embedder
         except Exception as exc:

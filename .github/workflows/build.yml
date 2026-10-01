@@ -39,7 +39,7 @@ jobs:
         run: ruff check app tests
 
       - name: Tests (pytest)
-        run: pytest -q
+        run: pytest -q -m "not network"
 
       - name: Export version
         id: version
