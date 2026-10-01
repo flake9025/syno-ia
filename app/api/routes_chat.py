@@ -66,6 +66,7 @@ async def chat(
                 "considered": result.considered,
                 "filtered_out": result.filtered_out,
                 "lexical_only": result.lexical_only,
+                "embeddings_pending": context.embeddings_pending,
             },
         )
 
@@ -138,6 +139,7 @@ async def search(
         "considered": result.considered,
         "filtered_out": result.filtered_out,
         "lexical_only": result.lexical_only,
+        "embeddings_pending": context.embeddings_pending,
     }
 
 

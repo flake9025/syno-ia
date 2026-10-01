@@ -5,13 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 
 from .config import Settings, get_settings
 from .hardware import HardwareProfile, detect_hardware
 from .llm.base import LLMBackend
 from .llm.factory import build_llm, local_model_path
-from .rag.embedder import Embedder, build_embedder
+from .rag.backfill import VectorBackfiller
+from .rag.embedder import DeferredEmbedder, Embedder, NullEmbedder, build_embedder
 from .rag.indexer import Indexer, IndexerConfig
 from .rag.pipeline import RetrievalPipeline
 from .rag.store import DocumentStore
@@ -37,18 +39,34 @@ class AppContext:
     sessions: SessionStore
     pipeline: RetrievalPipeline
     indexer: Indexer
+    backfiller: VectorBackfiller
     llm: LLMBackend | None = None
+    #: (moteur, modèle, threads) à charger en arrière-plan.
+    embedding_target: tuple[str, str, int] = ("none", "", 0)
     mapper: PathMapper = field(default_factory=PathMapper.empty)
     service_session: DSMSession | None = None
     started_at: float = field(default_factory=time.time)
     startup_errors: list[str] = field(default_factory=list)
     _scheduler: asyncio.Task | None = None
+    _warmup: asyncio.Task | None = None
     _service_login_blocked: bool = False
 
     # ---------------------------------------------------------------- statut
     @property
     def uptime(self) -> float:
         return time.time() - self.started_at
+
+    @property
+    def embeddings_pending(self) -> bool:
+        """Le moteur sémantique est-il encore en cours de mise à disposition ?
+
+        Vrai pendant le chargement du modèle comme pendant le rattrapage des
+        vecteurs : dans les deux cas la recherche est temporairement dégradée,
+        et le dire évite de faire passer un démarrage normal pour une panne.
+        """
+        if getattr(self.embedder, "state", "ready") in {"pending", "loading"}:
+            return True
+        return self.backfiller.progress.status == "running"
 
     def status(self) -> dict:
         return {
@@ -61,6 +79,7 @@ class AppContext:
             "llm": self.llm.describe() if self.llm else {"backend": "extractive", "available": True},
             "index": self.store.stats(),
             "indexing": self.indexer.progress.snapshot(),
+            "vectorization": self.backfiller.progress.snapshot(),
             "dsm": {
                 "url": self.settings.dsm_url,
                 "service_account": bool(self.service_session),
@@ -119,6 +138,59 @@ class AppContext:
             return
         self._scheduler = asyncio.create_task(self._schedule_loop())
 
+    # -------------------------------------------------------- embeddings
+    def start_embeddings(self) -> bool:
+        """Charge le moteur d'embeddings en arrière-plan, puis complète l'index.
+
+        Sans attendre : l'application sert déjà des réponses en BM25 pendant le
+        téléchargement du modèle, qui peut durer de longues minutes au premier
+        démarrage.
+        """
+        if not isinstance(self.embedder, DeferredEmbedder):
+            return False
+        if self._warmup and not self._warmup.done():
+            return False
+        self._warmup = asyncio.create_task(self._load_embeddings())
+        return True
+
+    async def _load_embeddings(self) -> None:
+        deferred = self.embedder
+        assert isinstance(deferred, DeferredEmbedder)
+        backend, model, threads = self.embedding_target
+        deferred.mark_loading()
+        logger.info(
+            "Chargement du moteur d'embeddings en arrière-plan (%s / %s) — "
+            "la recherche reste lexicale jusqu'à sa mise à disposition",
+            backend,
+            model or "modèle par défaut",
+        )
+        try:
+            engine = await asyncio.to_thread(
+                build_embedder,
+                backend,
+                model,
+                cache_dir=self.settings.models_dir,
+                threads=threads,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            message = f"Moteur d'embeddings indisponible : {exc}"
+            logger.error(message)
+            self._remember_error(message)
+            deferred.adopt(NullEmbedder(str(exc)))
+            return
+
+        deferred.adopt(engine)
+        if not engine.available:
+            self._remember_error(
+                "Aucun moteur d'embeddings n'a pu être chargé — recherche lexicale seule (BM25)."
+            )
+            return
+
+        await self.backfiller.run()
+
+
     async def _schedule_loop(self) -> None:
         interval = self.settings.index_interval_minutes * 60
         while True:
@@ -136,6 +208,13 @@ class AppContext:
     async def shutdown(self) -> None:
         if self._scheduler:
             self._scheduler.cancel()
+        self.backfiller.cancel()
+        if self._warmup:
+            self._warmup.cancel()
+            # Le chargement s'exécute dans un thread : on laisse la tâche se
+            # dénouer plutôt que d'abandonner la boucle sur une exception.
+            with suppress(asyncio.CancelledError):
+                await self._warmup
         await self.indexer.cancel()
         if self.service_session:
             await self.client.logout(self.service_session.sid)
@@ -163,12 +242,18 @@ async def build_context(settings: Settings | None = None) -> AppContext:
     store = DocumentStore(settings.db_path)
 
     backend, model = hardware.embedding_choice()
-    embedder = build_embedder(
-        settings.embedding_backend if settings.embedding_backend != "auto" else backend,
-        settings.embedding_model or model,
-        cache_dir=settings.models_dir,
-        threads=settings.llm_threads or hardware.recommended_threads(),
-    )
+    embedding_backend = settings.embedding_backend if settings.embedding_backend != "auto" else backend
+    embedding_model = settings.embedding_model or model
+    threads = settings.llm_threads or hardware.recommended_threads()
+
+    # Le chargement du moteur (téléchargement compris) est différé : l'application
+    # doit être joignable tout de suite, quitte à ne faire que du BM25 au début.
+    if settings.embedding_async_load and embedding_backend.lower() != "none":
+        embedder: Embedder = DeferredEmbedder()
+    else:
+        embedder = build_embedder(
+            embedding_backend, embedding_model, cache_dir=settings.models_dir, threads=threads
+        )
 
     client = DSMClient(
         settings.dsm_url,
@@ -211,6 +296,13 @@ async def build_context(settings: Settings | None = None) -> AppContext:
         sessions=sessions,
         pipeline=pipeline,
         indexer=indexer,
+        backfiller=VectorBackfiller(
+            store,
+            embedder,
+            batch_size=settings.embedding_backfill_batch,
+            is_indexing=lambda: indexer.running,
+        ),
+        embedding_target=(embedding_backend, embedding_model, threads),
     )
 
     for warning in hardware.warnings:

@@ -229,7 +229,7 @@ function renderSources(node, sources, meta) {
   block.className = 'sources';
   const notes = [];
   if (meta.filtered_out) notes.push(t('app.filtered', { n: meta.filtered_out }));
-  if (meta.lexical_only) notes.push(t('app.lexicalOnly'));
+  if (meta.lexical_only) notes.push(t(meta.embeddings_pending ? 'app.lexicalWarmup' : 'app.lexicalOnly'));
   block.innerHTML = `
     <h3>${t('app.sources')}</h3>
     ${sources.map((source) => `
@@ -370,6 +370,17 @@ async function refreshAdmin() {
   }
 }
 
+function embeddingState(status) {
+  const state = status.embedder.state;
+  const vector = status.vectorization || {};
+  if (state === 'pending' || state === 'loading') return 'chargement du modèle…';
+  if (state === 'failed') return `indisponible — ${status.embedder.reason || 'BM25 seul'}`;
+  if (state === 'disabled') return 'désactivé (BM25 seul)';
+  if (vector.running) return `vectorisation ${vector.done}/${vector.total || '?'}`;
+  if (vector.status === 'error') return `rattrapage en erreur — ${vector.last_error}`;
+  return status.embedder.available ? 'recherche hybride active' : 'BM25 seul';
+}
+
 function renderOverview(status) {
   const hardware = status.hardware;
   const index = status.index;
@@ -388,6 +399,7 @@ function renderOverview(status) {
         <h3>${t('admin.engine')}</h3>
         ${kv('Embeddings', `${status.embedder.backend} · ${status.embedder.model || '—'}`)}
         ${kv('Dimension', status.embedder.dimension || '—')}
+        ${kv('État', embeddingState(status))}
         ${kv('LLM', `${status.llm.backend} · ${status.llm.model || '—'}`)}
         ${kv('Modèle suggéré', hardware.suggested_llm || '—')}
       </div>

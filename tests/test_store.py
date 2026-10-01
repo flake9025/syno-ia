@@ -133,3 +133,76 @@ def test_liste_des_documents_filtre_par_partage(store: DocumentStore):
     assert len(store.list_documents(shares={"/documents"})) == 1
     assert store.list_documents(shares=set()) == []
     assert len(store.list_documents(shares=None)) == 2
+
+
+# ------------------------------------------------- rattrapage des vecteurs
+def add_sans_vecteur(store: DocumentStore, name: str, texts: list[str], share: str = "/documents"):
+    record = DocumentRecord(
+        real_path=f"/volume1/documents/{name}",
+        dsm_path=f"{share}/{name}",
+        share=share,
+        name=name,
+        ext=".txt",
+        size=1,
+        mtime=1700000000,
+        content_hash="hash",
+    )
+    chunks = [Chunk(text=text, ordinal=i, location="") for i, text in enumerate(texts)]
+    return store.upsert_document(record, chunks)
+
+
+def test_fragments_sans_vecteur_sont_reperes(store: DocumentStore):
+    add_sans_vecteur(store, "brut.txt", ["un", "deux"])
+    assert store.count_chunks_without_vectors(4) == 2
+    attente = store.chunks_without_vectors(4, limit=10)
+    assert [text for _, text in attente] == ["un", "deux"]
+
+
+def test_vecteurs_de_dimension_obsolete_sont_a_refaire(store: DocumentStore):
+    """Changer de modèle d'embeddings doit provoquer un recalcul, pas un index muet."""
+    add(store, "guide.txt", ["alpha", "beta"], dim=4)
+    assert store.count_chunks_without_vectors(4) == 0
+    assert store.count_chunks_without_vectors(8) == 2
+
+
+def test_rattrapage_active_la_recherche_semantique(store: DocumentStore):
+    add_sans_vecteur(store, "brut.txt", ["sauvegarde du NAS", "restauration"])
+    assert store.search_semantic(np.full(4, 1.0), limit=5) == []
+
+    attente = store.chunks_without_vectors(4, limit=10)
+    ecrits = store.set_chunk_embeddings(
+        [(chunk_id, np.full(4, 1.0) if "NAS" in text else np.array([1.0, 0.0, 0.0, 0.0]))
+         for chunk_id, text in attente]
+    )
+    assert ecrits == 2
+    assert store.count_chunks_without_vectors(4) == 0
+
+    hits = store.search_semantic(np.full(4, 1.0), limit=5)
+    assert hits and "NAS" in hits[0].text
+
+
+def test_rattrapage_preserve_l_index_lexical(store: DocumentStore):
+    """Le trigger FTS est restreint à « text » : ces écritures ne doivent rien casser."""
+    add_sans_vecteur(store, "brut.txt", ["procédure de sauvegarde hebdomadaire"])
+    attente = store.chunks_without_vectors(4, limit=10)
+    store.set_chunk_embeddings([(attente[0][0], np.full(4, 1.0))])
+    resultats = store.search_lexical("sauvegarde", limit=5)
+    assert len(resultats) == 1
+
+
+def test_modification_du_texte_resynchronise_le_fts(store: DocumentStore):
+    """Garde-fou : restreindre le trigger ne doit pas désynchroniser l'index."""
+    add_sans_vecteur(store, "brut.txt", ["ancienne formulation"])
+    chunk_id = store.chunks_without_vectors(4, limit=1)[0][0]
+    with store._lock, store._conn:
+        store._conn.execute(
+            "UPDATE chunks SET text = ? WHERE id = ?", ("nouvelle formulation", chunk_id)
+        )
+    assert store.search_lexical("ancienne", limit=5) == []
+    assert len(store.search_lexical("nouvelle", limit=5)) == 1
+
+
+def test_vecteurs_absents_sont_ignores(store: DocumentStore):
+    add_sans_vecteur(store, "brut.txt", ["texte"])
+    chunk_id = store.chunks_without_vectors(4, limit=1)[0][0]
+    assert store.set_chunk_embeddings([(chunk_id, None)]) == 0

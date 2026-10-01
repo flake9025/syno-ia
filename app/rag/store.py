@@ -25,7 +25,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _WORD_RE = re.compile(r"[\w\u00C0-\u024F]{2,}", re.UNICODE)
 #: Constante de lissage du Reciprocal Rank Fusion (valeur usuelle de la littérature).
 RRF_K = 60
@@ -185,7 +185,13 @@ class DocumentStore:
                 CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
                     INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.id, old.text);
                 END;
-                CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+
+                -- Restreint à « text » : le rattrapage des vecteurs met à jour
+                -- « embedding » et « dim » sur des milliers de fragments, sans
+                -- qu'il soit utile d'y réécrire l'index FTS à chaque ligne.
+                -- Recréé systématiquement pour migrer les bases antérieures.
+                DROP TRIGGER IF EXISTS chunks_au;
+                CREATE TRIGGER chunks_au AFTER UPDATE OF text ON chunks BEGIN
                     INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.id, old.text);
                     INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
                 END;
@@ -398,6 +404,41 @@ class DocumentStore:
                 params,
             ).fetchone()
         return {"documents": int(row["documents"]), "chunks": int(row["chunks"])}
+
+    def count_chunks_without_vectors(self, dimension: int) -> int:
+        """Fragments dont le vecteur manque ou n'a plus la bonne dimension."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM chunks WHERE dim != ?", (int(dimension),)
+            ).fetchone()
+        return int(row["n"])
+
+    def chunks_without_vectors(self, dimension: int, limit: int) -> list[tuple[int, str]]:
+        """Lot de fragments à vectoriser, du plus ancien au plus récent."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, text FROM chunks WHERE dim != ? ORDER BY id LIMIT ?",
+                (int(dimension), int(limit)),
+            ).fetchall()
+        return [(int(row["id"]), row["text"]) for row in rows]
+
+    def set_chunk_embeddings(self, items: Sequence[tuple[int, np.ndarray | None]]) -> int:
+        """Rattache après coup leurs vecteurs à des fragments déjà indexés."""
+        payload = [
+            (normalize_vector(vector).tobytes(), int(np.size(vector)), chunk_id)
+            for chunk_id, vector in items
+            if vector is not None
+        ]
+        if not payload:
+            return 0
+        with self._lock, self._conn:
+            # Seule la colonne « text » déclenche la synchronisation FTS (trigger
+            # chunks_au) : ces écritures ne touchent donc pas l'index lexical.
+            self._conn.executemany(
+                "UPDATE chunks SET embedding = ?, dim = ? WHERE id = ?", payload
+            )
+        self._generation += 1
+        return len(payload)
 
     def get_chunk_text(self, chunk_id: int) -> str:
         with self._lock:

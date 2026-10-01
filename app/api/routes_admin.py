@@ -108,6 +108,22 @@ async def index_progress(context: AppContext = Depends(get_context)) -> dict:
     return context.indexer.progress.snapshot()
 
 
+# ---------------------------------------------------------------- embeddings
+@router.post("/embeddings/reload")
+async def reload_embeddings(context: AppContext = Depends(get_context)) -> dict:
+    """Relance le chargement du moteur sémantique après un échec réseau.
+
+    Évite d'avoir à redémarrer le conteneur lorsque le téléchargement du modèle
+    a échoué au démarrage : l'application tournait alors en BM25 seul.
+    """
+    if not context.start_embeddings():
+        raise HTTPException(
+            status_code=409,
+            detail="Chargement déjà en cours, ou moteur fixé par la configuration.",
+        )
+    return {"started": True}
+
+
 @router.post("/index/clear")
 async def clear_index(context: AppContext = Depends(get_context)) -> dict:
     if context.indexer.running:

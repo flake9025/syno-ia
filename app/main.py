@@ -38,6 +38,7 @@ async def lifespan(app: FastAPI):
     context = await build_context(settings)
     app.state.context = context
 
+    context.start_embeddings()
     if settings.index_on_startup:
         await context.indexer.start()
     await context.start_scheduler()
