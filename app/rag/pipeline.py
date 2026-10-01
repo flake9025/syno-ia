@@ -93,21 +93,28 @@ class RetrievalPipeline:
         if not fused:
             return RetrievalResult([], "", 0, 0, not semantic)
 
-        authorized = await self._authorize(session, fused, top_k)
+        authorized, denied = await self._authorize(session, fused, top_k)
         context = self._build_context(authorized)
         return RetrievalResult(
             hits=authorized,
             context=context,
             considered=len(fused),
-            filtered_out=len(fused) - len(authorized),
+            filtered_out=denied,
             lexical_only=not semantic,
         )
 
     async def _authorize(
         self, session: DSMSession, hits: list[SearchHit], top_k: int
-    ) -> list[SearchHit]:
-        """Valide les permissions par lots jusqu'à réunir `top_k` résultats."""
+    ) -> tuple[list[SearchHit], int]:
+        """Valide les permissions par lots jusqu'à réunir `top_k` résultats.
+
+        Renvoie les extraits retenus et le nombre d'extraits **réellement
+        refusés** par les ACL. Les extraits jamais examinés — parce que `top_k`
+        était déjà atteint — ne sont pas comptés : les signaler comme refusés
+        laisserait croire à l'utilisateur qu'on lui cache des documents.
+        """
         selected: list[SearchHit] = []
+        denied = 0
         checked: dict[str, bool] = {}
         # Un document peut fournir plusieurs fragments : on regroupe par chemin.
         batch_size = max(top_k * 2, 10)
@@ -125,7 +132,9 @@ class RetrievalPipeline:
                     selected.append(hit)
                     if len(selected) >= top_k:
                         break
-        return selected
+                else:
+                    denied += 1
+        return selected, denied
 
     def _build_context(self, hits: list[SearchHit]) -> str:
         blocks: list[str] = []

@@ -111,3 +111,29 @@ async def test_question_vide(store: DocumentStore):
     pipeline = build(store, ["/documents"], {"/documents/public.pdf"})
     result = await pipeline.retrieve(DSMSession(sid="s", account="alice"), "   ")
     assert result.is_empty
+
+
+async def test_le_compteur_ne_retient_que_les_vrais_refus(store: DocumentStore):
+    """`filtered_out` alimente « n extraits écartés faute de droits ».
+
+    Avec un `top_k` plus petit que le nombre de candidats, les extraits
+    excédentaires ne sont jamais examinés : les compter comme refusés
+    ferait croire à l'utilisateur qu'on lui cache des documents.
+    """
+    pipeline = build(store, ["/documents", "/rh"], {
+        "/documents/public.pdf", "/documents/interne.pdf", "/rh/salaires.xlsx",
+    })
+    pipeline.top_k = 1
+
+    result = await pipeline.retrieve(DSMSession(sid="s", account="chef"), "procédure")
+
+    assert len(result.hits) == 1
+    assert result.considered == 3
+    assert result.filtered_out == 0
+
+
+async def test_le_compteur_signale_les_refus_reels(store: DocumentStore):
+    pipeline = build(store, ["/documents", "/rh"], {"/documents/public.pdf"})
+    result = await pipeline.retrieve(DSMSession(sid="s", account="alice"), "procédure")
+    assert [hit.name for hit in result.hits] == ["public.pdf"]
+    assert result.filtered_out == 2

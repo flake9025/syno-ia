@@ -154,7 +154,8 @@ async def documents(
     items = await asyncio.to_thread(
         context.store.list_documents, limit=limit, offset=offset, query=q, shares=shares
     )
-    return {"documents": items, "count": len(items)}
+    totals = await asyncio.to_thread(context.store.count_documents, query=q, shares=shares)
+    return {"documents": items, "count": len(items), "total": totals}
 
 
 @router.get("/document")
