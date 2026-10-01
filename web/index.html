@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="fr" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <title>syno-ia — Assistant documentaire du NAS</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+
+<!-- ------------------------------------------------------------ Connexion -->
+<section id="login-view" class="view login-view">
+  <form id="login-form" class="login-card" autocomplete="on">
+    <div class="login-brand">
+      <img src="/favicon.svg" alt="" width="46" height="46">
+      <div>
+        <h1>syno-ia</h1>
+        <p data-i18n="login.subtitle">Interrogez vos documents du NAS</p>
+      </div>
+    </div>
+
+    <label class="field">
+      <span data-i18n="login.account">Compte DSM</span>
+      <input type="text" id="account" name="username" autocomplete="username" required autofocus>
+    </label>
+
+    <label class="field">
+      <span data-i18n="login.password">Mot de passe</span>
+      <input type="password" id="password" name="password" autocomplete="current-password" required>
+    </label>
+
+    <label class="field hidden" id="otp-field">
+      <span data-i18n="login.otp">Code de vérification (2FA)</span>
+      <input type="text" id="otp" inputmode="numeric" autocomplete="one-time-code" maxlength="8">
+    </label>
+
+    <p id="login-error" class="error hidden" role="alert"></p>
+
+    <button type="submit" class="btn primary" id="login-submit">
+      <span data-i18n="login.submit">Se connecter</span>
+    </button>
+
+    <p class="login-hint" data-i18n="login.hint">
+      Vos identifiants sont vérifiés par DSM. syno-ia ne voit que les documents
+      auxquels votre compte a accès.
+    </p>
+    <p class="login-version" id="login-version"></p>
+  </form>
+</section>
+
+<!-- ----------------------------------------------------------------- App -->
+<section id="app-view" class="view app-view hidden">
+  <aside class="sidebar" id="sidebar">
+    <header class="sidebar-head">
+      <img src="/favicon.svg" alt="" width="28" height="28">
+      <strong>syno-ia</strong>
+      <button class="icon-btn only-mobile" id="close-sidebar" aria-label="Fermer">✕</button>
+    </header>
+
+    <button class="btn ghost block" id="new-chat" data-i18n="app.newChat">Nouvelle conversation</button>
+
+    <nav class="sidebar-section">
+      <h2 data-i18n="app.shares">Vos dossiers</h2>
+      <ul id="share-list" class="share-list"></ul>
+    </nav>
+
+    <nav class="sidebar-section grow">
+      <h2 data-i18n="app.documents">Documents indexés</h2>
+      <input type="search" id="doc-search" placeholder="Filtrer…" data-i18n-placeholder="app.filter">
+      <ul id="doc-list" class="doc-list"></ul>
+    </nav>
+
+    <footer class="sidebar-foot">
+      <div class="user-chip">
+        <span class="avatar" id="user-initials"></span>
+        <div>
+          <strong id="user-name"></strong>
+          <small id="user-role"></small>
+        </div>
+      </div>
+      <div class="sidebar-actions">
+        <button class="icon-btn" id="toggle-theme" title="Thème">◐</button>
+        <button class="icon-btn" id="toggle-lang" title="Language">FR</button>
+        <button class="icon-btn hidden" id="open-admin" title="Administration">⚙</button>
+        <button class="icon-btn" id="logout" data-i18n-title="app.logout" title="Se déconnecter">⏻</button>
+      </div>
+    </footer>
+  </aside>
+
+  <main class="chat">
+    <header class="chat-head">
+      <button class="icon-btn only-mobile" id="open-sidebar" aria-label="Menu">☰</button>
+      <div class="chat-title">
+        <h1 data-i18n="app.title">Assistant documentaire</h1>
+        <small id="engine-badge"></small>
+      </div>
+    </header>
+
+    <div class="messages" id="messages">
+      <div class="welcome" id="welcome">
+        <h2 data-i18n="welcome.title">Que cherchez-vous ?</h2>
+        <p data-i18n="welcome.body">
+          Posez une question en langage naturel. Les réponses sont construites
+          uniquement à partir des documents auxquels votre compte DSM a accès.
+        </p>
+        <div class="suggestions" id="suggestions"></div>
+      </div>
+    </div>
+
+    <form class="composer" id="composer">
+      <textarea id="question" rows="1" placeholder="Posez votre question…"
+                data-i18n-placeholder="app.placeholder" maxlength="2000"></textarea>
+      <button type="submit" class="btn primary send" id="send" aria-label="Envoyer">↑</button>
+      <button type="button" class="btn ghost send hidden" id="stop" aria-label="Arrêter">■</button>
+    </form>
+  </main>
+</section>
+
+<!-- ------------------------------------------------------------- Admin -->
+<dialog id="admin-dialog" class="admin">
+  <header class="admin-head">
+    <h2 data-i18n="admin.title">Administration</h2>
+    <button class="icon-btn" id="close-admin" aria-label="Fermer">✕</button>
+  </header>
+
+  <div class="admin-tabs" role="tablist">
+    <button class="tab active" data-tab="overview" data-i18n="admin.overview">Vue d'ensemble</button>
+    <button class="tab" data-tab="index" data-i18n="admin.index">Indexation</button>
+    <button class="tab" data-tab="models" data-i18n="admin.models">Modèles</button>
+  </div>
+
+  <div class="admin-body">
+    <section class="tab-panel active" data-panel="overview" id="panel-overview"></section>
+
+    <section class="tab-panel" data-panel="index">
+      <div class="admin-actions">
+        <button class="btn primary" id="index-start" data-i18n="admin.indexStart">Lancer l'indexation</button>
+        <button class="btn" id="index-full" data-i18n="admin.indexFull">Réindexer tout</button>
+        <button class="btn ghost" id="index-cancel" data-i18n="admin.indexCancel">Annuler</button>
+        <button class="btn ghost" id="index-optimize" data-i18n="admin.indexOptimize">Optimiser</button>
+      </div>
+      <div id="index-progress" class="progress-block"></div>
+      <div id="index-errors" class="doc-errors"></div>
+    </section>
+
+    <section class="tab-panel" data-panel="models" id="panel-models"></section>
+  </div>
+</dialog>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/assets/i18n.js"></script>
+<script src="/assets/app.js"></script>
+</body>
+</html>

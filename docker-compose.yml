@@ -1,0 +1,44 @@
+services:
+  syno-ia:
+    # Image publiée par l'intégration continue.
+    # Variante avec LLM local embarqué : ghcr.io/flake9025/syno-ia:latest-llm
+    image: ghcr.io/flake9025/syno-ia:latest
+    # Pour construire localement à la place :
+    # build:
+    #   context: .
+    #   args:
+    #     WITH_LOCAL_LLM: "false"
+    container_name: syno-ia
+    restart: unless-stopped
+    ports:
+      - "8083:8080"
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      DATA_DIR: /app/data
+      # Depuis un conteneur du NAS, la passerelle du bridge Docker atteint DSM.
+      DSM_URL: "http://172.17.0.1:5000"
+      INDEX_MODE: mount
+      INDEX_ROOTS: "/volume1/documents"
+    volumes:
+      # Index SQLite + modèles téléchargés (doit survivre aux mises à jour).
+      - /volume1/docker/apps/syno-ia/data:/app/data
+      # Partages à indexer, montés **en lecture seule** et **au même chemin**
+      # que sur le NAS : l'identité des chemins permet de rejouer les ACL DSM.
+      - /volume1/documents:/volume1/documents:ro
+      # - /volume1/homes:/volume1/homes:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 180s
+      retries: 5
+    # Le DS218+ n'a que 2 cœurs : on laisse de l'air à DSM.
+    cpus: 1.5
+    mem_limit: 5g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

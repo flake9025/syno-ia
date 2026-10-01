@@ -1,0 +1,30 @@
+# ---------------------------------------------------------------------------
+# syno-ia — dépendances du service (Python 3.11)
+# Toutes les libs listées ici disposent de wheels linux/amd64 ET linux/arm64,
+# afin que l'image Docker se construise sans chaîne de compilation lourde.
+# ---------------------------------------------------------------------------
+
+# --- Serveur web ---
+fastapi>=0.115,<0.121
+uvicorn[standard]>=0.32,<0.40
+python-multipart>=0.0.17
+pydantic>=2.9,<3
+pydantic-settings>=2.6,<3
+httpx>=0.27,<0.29
+
+# --- Calcul vectoriel ---
+numpy>=1.26,<3
+
+# --- Extraction de texte ---
+pypdf>=5.0,<7
+python-docx>=1.1,<2
+python-pptx>=1.0,<2
+openpyxl>=3.1,<4
+beautifulsoup4>=4.12,<5
+charset-normalizer>=3.3,<4
+
+# --- Embeddings ---
+# model2vec : embeddings statiques (pur NumPy), pour les NAS les plus modestes.
+model2vec>=0.3,<1
+# fastembed : encodeurs ONNX (e5), meilleure qualité dès que la RAM le permet.
+fastembed>=0.4,<1
