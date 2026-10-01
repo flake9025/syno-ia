@@ -1,0 +1,37 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- Données applicatives (index, modèles, logs) ---
+data/
+!data/.gitkeep
+models/
+*.db
+*.db-wal
+*.db-shm
+*.gguf
+
+# --- Secrets / environnement ---
+.env
+.env.*
+!.env.example
+
+# --- Divers ---
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/
+
+# --- Documentation officielle Synology (copie locale de travail) ---
+# Les PDF « File Station API » / « Login API » appartiennent à Synology :
+# on ne les redistribue pas, on les télécharge depuis le site de l'éditeur.
+_syno_docs/
