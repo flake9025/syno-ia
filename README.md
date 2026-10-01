@@ -200,6 +200,15 @@ Le profil peut être forcé : `HARDWARE_PROFILE=micro|small|medium|large`.
 
 ## Installation sur le NAS
 
+> **Préalable — rendre l'image publique.** GitHub publie les paquets GHCR en
+> *privé* par défaut, même pour un dépôt public. Tant que ce n'est pas changé,
+> le NAS reçoit une erreur `unauthorized` au `docker pull`. Après la première
+> exécution réussie du workflow, allez sur
+> <https://github.com/users/flake9025/packages/container/syno-ia/settings>
+> → *Change visibility* → **Public**.
+> À défaut, exportez `GHCR_USER` et `GHCR_TOKEN` (portée `read:packages`)
+> avant d'appeler `deploy/deploy-nas.sh`.
+
 ### Option A — Container Manager (interface graphique)
 
 1. **Container Manager → Registre** : recherchez `ghcr.io/flake9025/syno-ia`, ou utilisez
