@@ -413,7 +413,8 @@ python -m venv .venv
 pip install -r requirements.txt -r requirements-dev.txt
 
 # Tests et lint
-pytest -q
+pytest -q                  # suite complète (télécharge les modèles d'embeddings)
+pytest -q -m "not network" # suite hors ligne, comme en intégration continue
 ruff check app tests
 
 # Serveur local
@@ -435,7 +436,8 @@ contrôle d'accès, qui est la garantie centrale du projet.
 
 `.github/workflows/build.yml` enchaîne :
 
-1. **`lint_test`** — `ruff` puis `pytest`.
+1. **`lint_test`** — `ruff` puis `pytest -m "not network"` (les tests marqués
+   `network` téléchargent de vrais modèles et ne tournent qu'en local).
 2. **`docker_smoke`** — construction de l'image, démarrage, vérification de `/api/health`,
    de l'interface web, et du fait qu'une route protégée répond bien `401` sans session.
 3. **`docker_image`** — publication multi-architecture (`amd64` + `arm64`) sur

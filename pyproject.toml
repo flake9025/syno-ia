@@ -8,10 +8,17 @@ license = { text = "MIT" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# La racine du dépôt doit être importable : la CI lance « pytest » directement,
+# et contrairement à « python -m pytest » cela n'ajoute pas le dossier courant
+# au sys.path.
+pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-q --strict-markers"
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "network: test nécessitant un téléchargement de modèle (désactivé en CI)",
+]
 
 [tool.ruff]
 line-length = 100
