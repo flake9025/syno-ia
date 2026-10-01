@@ -26,6 +26,11 @@ CONTAINER="syno-ia"
 APP_PORT="8080"      # port interne du conteneur
 HOST_PORT="8083"     # port exposé sur le NAS (adapter si déjà pris)
 
+# Authentification GHCR. Inutile si le paquet est public (recommandé) ; sinon
+# renseignez un jeton disposant de la portée « read:packages ».
+GHCR_USER="${GHCR_USER:-}"
+GHCR_TOKEN="${GHCR_TOKEN:-}"
+
 # Répertoires persistants sur le NAS
 APP_DIR="/volume1/docker/apps/$CONTAINER"
 DATA_DIR="$APP_DIR/data"        # index SQLite + modèles téléchargés
@@ -69,7 +74,17 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 
 echo "Pull image"
-$DOCKER pull $IMAGE:$TAG
+if [ -n "$GHCR_TOKEN" ]; then
+  echo "$GHCR_TOKEN" | $DOCKER login ghcr.io -u "$GHCR_USER" --password-stdin
+fi
+
+if ! $DOCKER pull $IMAGE:$TAG; then
+  echo "ERREUR: impossible de récupérer $IMAGE:$TAG."
+  echo "Si le paquet GHCR est privé, rendez-le public depuis"
+  echo "  https://github.com/users/flake9025/packages/container/syno-ia/settings"
+  echo "ou exportez GHCR_USER et GHCR_TOKEN (portée read:packages)."
+  exit 1
+fi
 
 echo "Stop & remove ancien conteneur"
 $DOCKER stop "$CONTAINER" || true
