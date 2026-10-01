@@ -22,8 +22,8 @@ distant reste optionnel si vous le souhaitez).
 - [Modèle de sécurité](#modèle-de-sécurité)
 - [Prérequis](#prérequis)
 - [Profils matériels et choix des modèles](#profils-matériels-et-choix-des-modèles)
-- [Installation sur le NAS](#installation-sur-le-nas)
 - [Configuration DSM](#configuration-dsm)
+- [Installation sur le NAS](#installation-sur-le-nas)
 - [Variables d'environnement](#variables-denvironnement)
 - [Utilisation](#utilisation)
 - [Architecture](#architecture)
@@ -198,83 +198,11 @@ Le profil peut être forcé : `HARDWARE_PROFILE=micro|small|medium|large`.
 
 ---
 
-## Installation sur le NAS
-
-> **Préalable — rendre l'image publique.** GitHub publie les paquets GHCR en
-> *privé* par défaut, même pour un dépôt public. Tant que ce n'est pas changé,
-> le NAS reçoit une erreur `unauthorized` au `docker pull`. Après la première
-> exécution réussie du workflow, allez sur
-> <https://github.com/users/flake9025/packages/container/syno-ia/settings>
-> → *Change visibility* → **Public**.
-> À défaut, exportez `GHCR_USER` et `GHCR_TOKEN` (portée `read:packages`)
-> avant d'appeler `deploy/deploy-nas.sh`.
-
-### Option A — Container Manager (interface graphique)
-
-1. **Container Manager → Registre** : recherchez `ghcr.io/flake9025/syno-ia`, ou utilisez
-   **Projet** avec le `docker-compose.yml` du dépôt.
-2. **Container Manager → Projet → Créer** :
-   - chemin : `/docker/apps/syno-ia`
-   - source : *Créer docker-compose.yml* et collez le contenu du fichier du dépôt.
-3. Créez le fichier `.env` à côté, à partir de [`.env.example`](.env.example).
-4. Démarrez, puis ouvrez `http://<ip-du-nas>:8083`.
-
-### Option B — SSH (recommandé)
-
-```bash
-ssh admin@<ip-du-nas>
-
-sudo mkdir -p /volume1/docker/apps/syno-ia/data
-cd /volume1/docker/apps/syno-ia
-
-# Configuration
-curl -fsSL https://raw.githubusercontent.com/flake9025/syno-ia/main/.env.example -o .env
-vi .env          # renseignez au minimum APP_SECRET et le compte de service
-
-sudo docker run -d \
-  --name syno-ia \
-  -p 8083:8080 \
-  --env-file /volume1/docker/apps/syno-ia/.env \
-  -e INDEX_MODE=mount \
-  -e INDEX_ROOTS=/volume1/documents \
-  -v /volume1/docker/apps/syno-ia/data:/app/data \
-  -v /volume1/documents:/volume1/documents:ro \
-  --memory=5g \
-  --restart unless-stopped \
-  ghcr.io/flake9025/syno-ia:latest
-```
-
-Générez une clé de session avant de démarrer :
-
-```bash
-echo "APP_SECRET=$(openssl rand -hex 32)" >> .env
-```
-
-> ⚠️ **Montez les partages au même chemin que sur le NAS**
-> (`-v /volume1/documents:/volume1/documents:ro`). L'identité des chemins est ce qui permet
-> de faire correspondre un fichier indexé à son chemin DSM, et donc de rejouer ses ACL.
-> Un montage vers `/data/docs` casserait cette correspondance.
-
-### Variante avec LLM 100 % local
-
-```bash
-# image contenant llama.cpp compilé sans AVX
-ghcr.io/flake9025/syno-ia:latest-llm
-```
-
-Puis, depuis le panneau d'administration, onglet **Modèles** : *Télécharger le modèle
-recommandé*. Le fichier GGUF (~1 Go pour le profil `small`) est stocké dans
-`/app/data/models` et survit aux mises à jour.
-
-### Variante sans aucun montage
-
-Si vous préférez ne monter aucun partage, `INDEX_MODE=filestation` fait lire les fichiers
-par l'API DSM avec le compte de service. C'est plus lent et plus gourmand en réseau, mais
-strictement équivalent côté sécurité.
-
----
-
 ## Configuration DSM
+
+> Ces quatre étapes sont à réaliser **avant** l'installation : le conteneur a besoin
+> du compte de service dès son premier démarrage, et refusera de dialoguer avec DSM
+> tant que les droits et le pare-feu ne sont pas en place.
 
 ### 1. Créer un compte de service
 
@@ -319,10 +247,93 @@ Par défaut, `DSM_URL=http://172.17.0.1:5000` : le trafic ne quitte pas la machi
 utiliser HTTPS, mettez `https://172.17.0.1:5001` et laissez `DSM_VERIFY_SSL=false` si le
 certificat DSM est auto-signé.
 
-Pour exposer `syno-ia` lui-même en HTTPS, placez-le derrière le **Reverse Proxy** de DSM
-(Panneau de configuration → Portail de connexion → Reverse Proxy) en activant
-`WebSocket`/`HTTP/1.1` et en désactivant la mise en tampon des réponses (le chat utilise
-des flux SSE).
+Pour exposer `syno-ia` lui-même en HTTPS — une fois l'application installée — placez-le
+derrière le **Reverse Proxy** de DSM (Panneau de configuration → Portail de connexion →
+Reverse Proxy) en activant `WebSocket`/`HTTP/1.1` et en désactivant la mise en tampon des
+réponses (le chat utilise des flux SSE).
+
+---
+
+## Installation sur le NAS
+
+Le compte de service de l'étape précédente doit exister : notez son nom et son mot de
+passe, ils sont demandés dans le fichier `.env`.
+
+> **Si vous déployez votre propre fork.** GitHub publie les paquets GHCR en *privé* par
+> défaut, même pour un dépôt public : le NAS recevrait alors `unauthorized` au
+> `docker pull`. Après la première exécution réussie du workflow, passez le paquet en
+> *Public* depuis ses réglages
+> (`https://github.com/users/<vous>/packages/container/syno-ia/settings`), ou exportez
+> `GHCR_USER` et `GHCR_TOKEN` (portée `read:packages`) avant d'appeler
+> `deploy/deploy-nas.sh`. L'image officielle de ce dépôt est déjà publique.
+
+### Option A — Container Manager (interface graphique)
+
+1. **Container Manager → Registre** : recherchez `ghcr.io/flake9025/syno-ia`, ou utilisez
+   **Projet** avec le `docker-compose.yml` du dépôt.
+2. **Container Manager → Projet → Créer** :
+   - chemin : `/docker/apps/syno-ia`
+   - source : *Créer docker-compose.yml* et collez le contenu du fichier du dépôt.
+3. Créez le fichier `.env` à côté, à partir de [`.env.example`](.env.example), en y
+   reportant `APP_SECRET`, `DSM_SERVICE_ACCOUNT` et `DSM_SERVICE_PASSWORD`.
+4. Démarrez, puis ouvrez `http://<ip-du-nas>:8083` et connectez-vous avec **votre compte
+   DSM habituel**.
+
+### Option B — SSH (recommandé)
+
+```bash
+ssh admin@<ip-du-nas>
+
+sudo mkdir -p /volume1/docker/apps/syno-ia/data
+cd /volume1/docker/apps/syno-ia
+
+# 1. Configuration de départ
+curl -fsSL https://raw.githubusercontent.com/flake9025/syno-ia/main/.env.example -o .env
+
+# 2. Clé de signature des sessions (à générer avant le premier démarrage)
+echo "APP_SECRET=$(openssl rand -hex 32)" >> .env
+
+# 3. Compte de service créé à l'étape « Configuration DSM »
+vi .env          # DSM_SERVICE_ACCOUNT et DSM_SERVICE_PASSWORD
+
+# 4. Démarrage
+sudo docker run -d \
+  --name syno-ia \
+  -p 8083:8080 \
+  --env-file /volume1/docker/apps/syno-ia/.env \
+  -e INDEX_MODE=mount \
+  -e INDEX_ROOTS=/volume1/documents \
+  -v /volume1/docker/apps/syno-ia/data:/app/data \
+  -v /volume1/documents:/volume1/documents:ro \
+  --memory=5g \
+  --restart unless-stopped \
+  ghcr.io/flake9025/syno-ia:latest
+```
+
+Ouvrez ensuite `http://<ip-du-nas>:8083` et connectez-vous avec **votre compte DSM
+habituel** — pas avec le compte de service, qui ne sert qu'aux vérifications internes.
+
+> ⚠️ **Montez les partages au même chemin que sur le NAS**
+> (`-v /volume1/documents:/volume1/documents:ro`). L'identité des chemins est ce qui permet
+> de faire correspondre un fichier indexé à son chemin DSM, et donc de rejouer ses ACL.
+> Un montage vers `/data/docs` casserait cette correspondance.
+
+### Variante avec LLM 100 % local
+
+```bash
+# image contenant llama.cpp compilé sans AVX
+ghcr.io/flake9025/syno-ia:latest-llm
+```
+
+Puis, depuis le panneau d'administration, onglet **Modèles** : *Télécharger le modèle
+recommandé*. Le fichier GGUF (~1 Go pour le profil `small`) est stocké dans
+`/app/data/models` et survit aux mises à jour.
+
+### Variante sans aucun montage
+
+Si vous préférez ne monter aucun partage, `INDEX_MODE=filestation` fait lire les fichiers
+par l'API DSM avec le compte de service. C'est plus lent et plus gourmand en réseau, mais
+strictement équivalent côté sécurité.
 
 ---
 
