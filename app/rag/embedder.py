@@ -92,6 +92,70 @@ class NullEmbedder(Embedder):
         return data
 
 
+class DeferredEmbedder(Embedder):
+    """Moteur chargé en arrière-plan, remplaçable à chaud.
+
+    Le premier démarrage télécharge le modèle d'embeddings : plusieurs minutes
+    sur la liaison d'un NAS domestique. Charger ce modèle pendant le démarrage
+    retarderait d'autant la disponibilité du service — assez pour que le
+    *healthcheck* Docker abandonne et relance le conteneur, qui recommencerait
+    le téléchargement depuis le début, indéfiniment.
+
+    L'application démarre donc immédiatement en recherche lexicale seule (BM25),
+    pleinement utilisable, et bascule en recherche hybride dès que le moteur est
+    prêt. `pipeline` et `indexer` consultent `available` à chaque appel : la
+    bascule ne demande aucune reconstruction de ces composants.
+    """
+
+    def __init__(self, reason: str = "chargement en arrière-plan") -> None:
+        self._delegate: Embedder = NullEmbedder(reason)
+        self._lock = threading.Lock()
+        #: pending → loading → ready, ou failed / disabled.
+        self.state = "pending"
+
+    # Les attributs sont relus à chaque accès : ils suivent le moteur courant.
+    @property
+    def backend(self) -> str:  # type: ignore[override]
+        return self._delegate.backend
+
+    @property
+    def model_name(self) -> str:  # type: ignore[override]
+        return self._delegate.model_name
+
+    @property
+    def dimension(self) -> int:  # type: ignore[override]
+        return self._delegate.dimension
+
+    @property
+    def available(self) -> bool:
+        return self._delegate.available
+
+    def mark_loading(self) -> None:
+        self.state = "loading"
+
+    def adopt(self, embedder: Embedder) -> None:
+        """Installe le moteur réellement chargé (ou son repli)."""
+        with self._lock:
+            self._delegate = embedder
+            self.state = "ready" if embedder.available else "failed"
+
+    def disable(self, reason: str) -> None:
+        with self._lock:
+            self._delegate = NullEmbedder(reason)
+            self.state = "disabled"
+
+    def embed_documents(self, texts: Sequence[str]) -> list[np.ndarray]:
+        return self._delegate.embed_documents(texts)
+
+    def embed_query(self, text: str) -> np.ndarray | None:
+        return self._delegate.embed_query(text)
+
+    def describe(self) -> dict:
+        data = self._delegate.describe()
+        data["state"] = self.state
+        return data
+
+
 class Model2VecEmbedder(Embedder):
     backend = "model2vec"
 

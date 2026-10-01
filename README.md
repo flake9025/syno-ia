@@ -361,6 +361,8 @@ Fichier complet et commenté : [`.env.example`](.env.example). L'essentiel :
 | `SESSION_TTL_MINUTES` | `720` | Durée d'une session web. |
 | `EMBEDDING_BACKEND` | `auto` | `auto`, `model2vec`, `fastembed`, `none`. |
 | `EMBEDDING_MODEL` | *(selon profil)* | Dépôt Hugging Face. En mode `fastembed`, le modèle **doit** figurer dans le catalogue ONNX (`TextEmbedding.list_supported_models()`), sinon l'application bascule automatiquement sur model2vec. |
+| `EMBEDDING_ASYNC_LOAD` | `true` | Charge le modèle en arrière-plan (voir [Premier démarrage](#premier-démarrage)). `false` rend le démarrage bloquant. |
+| `EMBEDDING_BACKFILL_BATCH` | `64` | Fragments vectorisés par lot lors du rattrapage. |
 | `LLM_BACKEND` | `auto` | `auto`, `llamacpp`, `ollama`, `openai`, `none`. |
 | `OLLAMA_URL` | `http://172.17.0.1:11434` | Ollama local ou distant. |
 | `OPENAI_API_KEY` | *(vide)* | Service compatible OpenAI. |
@@ -385,6 +387,32 @@ La première indexation d'un corpus de quelques milliers de documents prend de 2
 plusieurs heures sur un DS218+. Elle est incrémentale : les exécutions suivantes ne
 retraitent que ce qui a changé (taille ou date de modification).
 
+### Premier démarrage
+
+Au tout premier lancement, le modèle d'embeddings doit être téléchargé depuis Hugging
+Face — quelques centaines de mégaoctets, soit plusieurs minutes sur la liaison d'un NAS
+domestique. **L'application n'attend pas** : elle répond immédiatement en recherche
+lexicale (BM25), pleinement utilisable, et bascule en recherche hybride dès que le moteur
+est prêt.
+
+Concrètement :
+
+1. L'interface est accessible en quelques secondes ; le bandeau sous les réponses indique
+   *« le moteur sémantique se prépare encore »*.
+2. L'indexation peut démarrer en parallèle : les documents sont découpés et interrogeables
+   par mots-clés tout de suite.
+3. Dès que le modèle est chargé, les fragments déjà indexés sont vectorisés par lots —
+   **sans réindexation**, les documents n'étant ni relus ni redécoupés.
+4. Le panneau d'administration (⚙️ → *Aperçu* → *Moteur*) affiche l'état :
+   `chargement du modèle…`, puis `vectorisation 320/1200`, puis `recherche hybride active`.
+
+C'est aussi ce qui évite une panne silencieuse : un chargement bloquant pouvait dépasser le
+délai du *healthcheck* Docker, qui relançait alors le conteneur — lequel recommençait le
+téléchargement depuis le début, indéfiniment.
+
+Le même mécanisme s'applique après un changement de `EMBEDDING_MODEL` : les vecteurs dont
+la dimension ne correspond plus sont recalculés en arrière-plan.
+
 ---
 
 ## Architecture
@@ -408,6 +436,8 @@ retraitent que ce qui a changé (taille ou date de modification).
 │ Index SQLite (WAL)   documents │ chunks │ FTS5 │ vecteurs      │
 ├───────────────────────────────────────────────────────────────┤
 │ Indexeur    extraction → découpage → embeddings → SQLite      │
+│             (vecteurs rattrapés après coup si le moteur       │
+│              n'était pas encore chargé)                        │
 ├───────────────────────────────────────────────────────────────┤
 │ DSM         list_share (partages) │ getinfo (ACL par fichier)  │
 └───────────────────────────────────────────────────────────────┘
@@ -425,6 +455,10 @@ Choix techniques notables :
 - **Vérification ACL par lots de 20**, avec repli automatique chemin par chemin : DSM ne
   documente pas le comportement de `getinfo` en cas d'échec partiel, et un seul fichier
   supprimé depuis l'indexation ferait échouer tout le lot.
+- **Chargement différé des embeddings** : le moteur est encapsulé dans un proxy
+  (`DeferredEmbedder`) que le pipeline et l'indexeur interrogent à chaque appel. Le
+  remplacer à chaud suffit à faire basculer l'application de BM25 vers la recherche
+  hybride, sans reconstruire aucun composant ni redémarrer le service.
 
 ---
 
@@ -491,6 +525,8 @@ Secret à créer dans le dépôt GitHub : `NAS_WEBHOOK_URL`. Aucun autre n'est r
 | `Illegal instruction` au chargement du LLM | Roue `llama-cpp-python` avec AVX2 sur un CPU sans AVX | Utilisez l'image `:latest-llm` de ce dépôt |
 | Aucun résultat alors que les documents existent | Partage non visible par votre compte DSM, ou indexation non terminée | Panneau d'administration → *Indexation* ; vérifiez vos permissions DSM |
 | L'indexation se fige puis redémarre | Mémoire insuffisante (OOM killer) | Augmentez `--memory`, réduisez `INDEX_BATCH_SIZE`, passez `EMBEDDING_BACKEND=model2vec` |
+| Les réponses ignorent le sens des mots | Le moteur sémantique n'est pas encore prêt (BM25 seul) | Normal au premier démarrage : voir [Premier démarrage](#premier-démarrage). Suivez l'état dans ⚙️ → *Aperçu* → *Moteur* |
+| `État : indisponible` dans le panneau *Moteur* | Téléchargement du modèle impossible (réseau, DNS, quota Hugging Face) | L'application reste utilisable en BM25. Rétablissez l'accès sortant du conteneur, puis relancez le chargement sans redémarrer : `POST /api/admin/embeddings/reload` |
 | Réponses très lentes | LLM local trop gros pour le CPU | `LLM_BACKEND=none` (extractif) ou LLM distant |
 | Le chat n'affiche rien derrière un reverse proxy | Mise en tampon des réponses SSE | Désactivez le *buffering* dans la configuration du proxy |
 

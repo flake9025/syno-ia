@@ -103,8 +103,9 @@ RUN mkdir -p /app/data/models
 VOLUME ["/app/data"]
 EXPOSE 8080
 
-# Le premier démarrage télécharge le modèle d'embeddings : période de grâce large.
-HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=5 \
+# L'application répond dès le démarrage (recherche lexicale), le modèle d'embeddings
+# se chargeant en arrière-plan : la période de grâce n'a plus à couvrir son téléchargement.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
   CMD curl -fsS "http://127.0.0.1:${PORT}/api/health" || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]

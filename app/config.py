@@ -112,6 +112,13 @@ class Settings(BaseSettings):
     #: « auto » | « model2vec » | « fastembed » | « none »
     embedding_backend: str = "auto"
     embedding_model: str = ""
+    #: Charge le modèle en arrière-plan : l'application répond immédiatement en
+    #: recherche lexicale (BM25), puis bascule en hybride une fois le moteur
+    #: prêt. Passer à `false` rend le démarrage bloquant — le premier
+    #: téléchargement peut alors dépasser le délai du healthcheck Docker.
+    embedding_async_load: bool = True
+    #: Nombre de fragments vectorisés par lot lors du rattrapage.
+    embedding_backfill_batch: int = 64
 
     # -------------------------------------------------------------------- llm
     #: « auto » | « llamacpp » | « ollama » | « openai » | « none »

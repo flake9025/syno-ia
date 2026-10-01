@@ -29,6 +29,7 @@ async def health(context: AppContext | None = Depends(_context)) -> dict:
         "indexing": context.indexer.progress.status,
         "llm": context.llm.name if context.llm else "extractive",
         "embeddings": context.embedder.backend,
+        "embeddings_state": getattr(context.embedder, "state", "ready"),
     }
 
 
