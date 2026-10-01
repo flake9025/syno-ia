@@ -157,6 +157,24 @@ def test_liste_des_documents_filtree(client: TestClient):
     assert [doc["name"] for doc in documents] == ["public.pdf"]
 
 
+def test_totaux_documents_limites_aux_partages_autorises(client: TestClient):
+    """Le bandeau de l'interface ne doit pas trahir l'existence des partages interdits."""
+    connexion(client)
+    total_alice = client.get("/api/documents").json()["total"]
+    connexion(client, "admin")
+    total_admin = client.get("/api/documents").json()["total"]
+    assert total_alice["documents"] == 1
+    assert total_admin["documents"] > total_alice["documents"]
+    assert total_admin["chunks"] > total_alice["chunks"]
+
+
+def test_health_ne_divulgue_pas_la_taille_de_l_index(client: TestClient):
+    """Route publique : aucune statistique d'index ne doit y transiter."""
+    payload = client.get("/api/health").json()
+    assert "documents" not in payload
+    assert "chunks" not in payload
+
+
 def test_telechargement_interdit(client: TestClient):
     connexion(client)
     response = client.get("/api/document", params={"path": "/rh/salaires.xlsx"})

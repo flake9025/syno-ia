@@ -13,6 +13,12 @@ services, aucun document RH qui ressort dans le chat d'un stagiaire.
 Rien ne sort du NAS : indexation, recherche et génération se font en local (un service
 distant reste optionnel si vous le souhaitez).
 
+![Interface de syno-ia : réponse avec citations et liste des partages autorisés](docs/capture-interface.png)
+
+*Marie est connectée avec son compte DSM. La barre latérale ne liste que `documents` et
+`projets` : le partage `rh`, auquel elle n'a pas accès, n'apparaît pas — et son contenu
+ne peut pas remonter dans les réponses.*
+
 ---
 
 ## Sommaire
@@ -488,7 +494,8 @@ Secret à créer dans le dépôt GitHub : `NAS_WEBHOOK_URL`. Aucun autre n'est r
 | Réponses très lentes | LLM local trop gros pour le CPU | `LLM_BACKEND=none` (extractif) ou LLM distant |
 | Le chat n'affiche rien derrière un reverse proxy | Mise en tampon des réponses SSE | Désactivez le *buffering* dans la configuration du proxy |
 
-Journaux : `docker logs -f syno-ia`. Diagnostic complet : `GET /api/health` (public) et
+Journaux : `docker logs -f syno-ia`. État du service : `GET /api/health` (public, sans
+aucune statistique d'index). Diagnostic complet, dont les compteurs d'indexation :
 `GET /api/admin/status` (administrateurs).
 
 ---

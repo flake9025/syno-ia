@@ -376,6 +376,29 @@ class DocumentStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def count_documents(self, *, query: str = "", shares: set[str] | None = None) -> dict:
+        """Totaux restreints aux partages visibles, pour ne rien révéler du reste de l'index."""
+        clauses, params = ["d.status = 'ok'"], []
+        if query:
+            clauses.append("(d.name LIKE ? OR d.dsm_path LIKE ?)")
+            params.extend([f"%{query}%", f"%{query}%"])
+        if shares is not None:
+            if not shares:
+                return {"documents": 0, "chunks": 0}
+            clauses.append(f"LOWER(d.share) IN ({','.join('?' for _ in shares)})")
+            params.extend(sorted(shares))
+        where = " AND ".join(clauses)
+        with self._lock:
+            row = self._conn.execute(
+                f"""
+                SELECT COUNT(*) AS documents,
+                       COALESCE(SUM(d.chunk_count), 0) AS chunks
+                FROM documents d WHERE {where}
+                """,
+                params,
+            ).fetchone()
+        return {"documents": int(row["documents"]), "chunks": int(row["chunks"])}
+
     def get_chunk_text(self, chunk_id: int) -> str:
         with self._lock:
             row = self._conn.execute(

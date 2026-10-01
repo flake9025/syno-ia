@@ -160,10 +160,25 @@ async function loadShares() {
   }
 }
 
+const badgeState = { engine: null, totals: null };
+
+function renderEngineBadge() {
+  const { engine, totals } = badgeState;
+  if (!engine) {
+    $('#engine-badge').textContent = '';
+    return;
+  }
+  const llm = engine.llm === 'extractive' ? 'extractif' : engine.llm;
+  const parts = [];
+  if (totals) parts.push(`${totals.documents} doc · ${totals.chunks} extraits`);
+  parts.push(llm, engine.profile);
+  $('#engine-badge').textContent = parts.join(' · ');
+}
+
 async function loadDocuments(query = '') {
   const list = $('#doc-list');
   try {
-    const { documents } = await api(`/api/documents?limit=60&q=${encodeURIComponent(query)}`);
+    const { documents, total } = await api(`/api/documents?limit=60&q=${encodeURIComponent(query)}`);
     list.innerHTML = documents.length
       ? documents.map((doc) => `
           <li title="${escapeHtml(doc.dsm_path)}">
@@ -171,6 +186,11 @@ async function loadDocuments(query = '') {
             <span class="doc-meta">${formatBytes(doc.size)}</span>
           </li>`).join('')
       : `<li class="empty">${t('app.noDocs')}</li>`;
+    // Le bandeau annonce le corpus complet de l'utilisateur, pas le résultat d'un filtre.
+    if (!query && total) {
+      badgeState.totals = total;
+      renderEngineBadge();
+    }
   } catch {
     list.innerHTML = `<li class="empty">${t('app.noDocs')}</li>`;
   }
@@ -178,13 +198,11 @@ async function loadDocuments(query = '') {
 
 async function loadEngineBadge() {
   try {
-    const health = await (await fetch('/api/health')).json();
-    const llm = health.llm === 'extractive' ? 'extractif' : health.llm;
-    $('#engine-badge').textContent =
-      `${health.documents} doc · ${health.chunks} extraits · ${llm} · ${health.profile}`;
+    badgeState.engine = await (await fetch('/api/health')).json();
   } catch {
-    $('#engine-badge').textContent = '';
+    badgeState.engine = null;
   }
+  renderEngineBadge();
 }
 
 /* --------------------------------------------------------------------- Chat */

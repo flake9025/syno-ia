@@ -18,15 +18,14 @@ async def health(context: AppContext | None = Depends(_context)) -> dict:
     """Réponse volontairement minimale et toujours disponible (aucune authentification)."""
     if context is None:
         return {"status": "starting"}
-    stats = context.store.stats()
+    # Volontairement sans statistiques d'index : cette route est publique et le nombre de
+    # documents indexés révélerait le contenu de partages que l'appelant n'a pas le droit de voir.
     return {
         "status": "ok",
         "version": context.settings.app_version,
         "build": context.settings.build_sha,
         "uptime": round(context.uptime, 1),
         "profile": context.hardware.profile,
-        "documents": stats["documents"],
-        "chunks": stats["chunks"],
         "indexing": context.indexer.progress.status,
         "llm": context.llm.name if context.llm else "extractive",
         "embeddings": context.embedder.backend,
