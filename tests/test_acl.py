@@ -93,6 +93,93 @@ async def test_session_expiree_est_propagee(client: FakeClient):
         await controller.filter_paths(session("sid-alice"), ["/documents/public.pdf"])
 
 
+# --------------------------------------------------------------- dossiers personnels
+@pytest.fixture
+def client_homes() -> FakeClient:
+    """DSM tel qu'il se présente réellement : chacun voit son dossier sous « /home »."""
+    return FakeClient(
+        shares={
+            "sid-alice": ["/documents", "/home"],
+            "sid-bob": ["/documents", "/home"],
+            "sid-admin": ["/documents", "/home", "/homes"],
+        },
+        files={
+            "sid-alice": {"/home/notes.pdf", "/documents/public.pdf"},
+            "sid-bob": {"/home/notes.pdf", "/documents/public.pdf"},
+            "sid-admin": {"/homes/alice/notes.pdf", "/homes/bob/notes.pdf"},
+        },
+    )
+
+
+async def test_proprietaire_retrouve_son_dossier_personnel(client_homes: FakeClient):
+    """Indexé sous « /homes/alice », le document doit être rendu à Alice."""
+    controller = AccessController(client_homes, ttl=60)
+    autorises = await controller.filter_paths(
+        session("sid-alice", "alice"), ["/homes/alice/notes.pdf"]
+    )
+    # Le chemin rendu reste celui de l'index, pas l'alias utilisé pour le contrôle.
+    assert autorises == {"/homes/alice/notes.pdf"}
+
+
+async def test_dossier_personnel_verifie_sous_son_alias(client_homes: FakeClient):
+    """La vérification DSM doit porter sur « /home/... », seul nom que l'utilisateur possède."""
+    vus: list[list[str]] = []
+    original = client_homes.stat_paths
+
+    async def espion(sid: str, paths):
+        vus.append(list(paths))
+        return await original(sid, paths)
+
+    client_homes.stat_paths = espion
+    controller = AccessController(client_homes, ttl=60)
+    await controller.filter_paths(session("sid-alice", "alice"), ["/homes/alice/notes.pdf"])
+    assert vus == [["/home/notes.pdf"]]
+
+
+async def test_dossier_personnel_d_un_tiers_est_masque(client_homes: FakeClient):
+    """Bob ne doit jamais atteindre le dossier personnel d'Alice."""
+    controller = AccessController(client_homes, ttl=60)
+    autorises = await controller.filter_paths(
+        session("sid-bob", "bob"),
+        ["/homes/alice/notes.pdf", "/homes/bob/notes.pdf"],
+    )
+    assert autorises == {"/homes/bob/notes.pdf"}
+
+
+async def test_dossier_personnel_d_un_tiers_sans_appel_dsm(client_homes: FakeClient):
+    """Le refus intervient dès le niveau 1, sans interroger File Station."""
+    controller = AccessController(client_homes, ttl=60)
+    autorises = await controller.filter_paths(
+        session("sid-bob", "bob"), ["/homes/alice/notes.pdf"]
+    )
+    assert autorises == set()
+    assert client_homes.stat_calls == 0
+
+
+async def test_administrateur_voit_les_dossiers_personnels(client_homes: FakeClient):
+    """Un compte qui voit « /homes » garde les droits que DSM lui accorde."""
+    controller = AccessController(client_homes, ttl=60)
+    autorises = await controller.filter_paths(
+        session("sid-admin", "admin"),
+        ["/homes/alice/notes.pdf", "/homes/bob/notes.pdf"],
+    )
+    assert autorises == {"/homes/alice/notes.pdf", "/homes/bob/notes.pdf"}
+
+
+async def test_perimetre_index_expose_le_prefixe_personnel(client_homes: FakeClient):
+    controller = AccessController(client_homes, ttl=60)
+    partages, prefixe = await controller.index_scope(session("sid-alice", "alice"))
+    assert prefixe == "/homes/alice"
+    assert "/documents" in partages
+
+
+async def test_perimetre_index_sans_dossier_personnel(client: FakeClient):
+    """Sans partage « /home », aucun préfixe personnel n'est ajouté."""
+    controller = AccessController(client, ttl=60)
+    _, prefixe = await controller.index_scope(session("sid-alice", "alice"))
+    assert prefixe == ""
+
+
 async def test_mise_en_cache_des_verdicts(client: FakeClient):
     controller = AccessController(client, ttl=300)
     for _ in range(3):

@@ -51,6 +51,9 @@ class IndexProgress:
     last_error: str = ""
     last_run_at: float = 0.0
     last_duration: float = 0.0
+    #: Racines déclarées dans INDEX_ROOTS mais absentes du conteneur : presque
+    #: toujours un montage `-v` manquant ou un nom de partage erroné.
+    missing_roots: list[str] = field(default_factory=list)
 
     def snapshot(self) -> dict:
         data = self.__dict__.copy()
@@ -201,7 +204,14 @@ class Indexer:
         for root in self.config.roots:
             root_path = Path(root)
             if not root_path.exists():
-                logger.warning("Racine d'indexation absente du conteneur : %s", root)
+                logger.warning(
+                    "Racine d'indexation absente du conteneur : %s — vérifiez que ce "
+                    "partage est bien monté (-v %s:%s:ro) et que son nom est exact",
+                    root,
+                    root,
+                    root,
+                )
+                self.progress.missing_roots.append(root)
                 continue
             for item in self._walk(root_path):
                 try:

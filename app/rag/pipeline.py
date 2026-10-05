@@ -73,20 +73,24 @@ class RetrievalPipeline:
             return RetrievalResult([], "", 0, 0, not self.embedder.available)
 
         top_k = top_k or self.top_k
-        allowed_shares = await self.access.readable_share_paths(session)
-        if not allowed_shares:
+        allowed_shares, home_prefix = await self.access.index_scope(session)
+        if not allowed_shares and not home_prefix:
             logger.info("Aucun partage accessible pour %s", session.account)
             return RetrievalResult([], "", 0, 0, not self.embedder.available)
 
         lexical = await asyncio.to_thread(
-            self.store.search_lexical, question, self.candidates, allowed_shares
+            self.store.search_lexical, question, self.candidates, allowed_shares, home_prefix
         )
         semantic: list[SearchHit] = []
         if self.embedder.available:
             embedding = await asyncio.to_thread(self.embedder.embed_query, question)
             if embedding is not None:
                 semantic = await asyncio.to_thread(
-                    self.store.search_semantic, embedding, self.candidates, allowed_shares
+                    self.store.search_semantic,
+                    embedding,
+                    self.candidates,
+                    allowed_shares,
+                    home_prefix,
                 )
 
         fused = reciprocal_rank_fusion([lexical, semantic])

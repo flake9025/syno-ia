@@ -152,11 +152,18 @@ async def documents(
     context: AppContext = Depends(get_context),
 ) -> dict:
     """Liste les documents indexés, restreinte aux partages visibles par l'utilisateur."""
-    shares = await context.access.readable_share_paths(session.dsm)
+    shares, home_prefix = await context.access.index_scope(session.dsm)
     items = await asyncio.to_thread(
-        context.store.list_documents, limit=limit, offset=offset, query=q, shares=shares
+        context.store.list_documents,
+        limit=limit,
+        offset=offset,
+        query=q,
+        shares=shares,
+        home_prefix=home_prefix,
     )
-    totals = await asyncio.to_thread(context.store.count_documents, query=q, shares=shares)
+    totals = await asyncio.to_thread(
+        context.store.count_documents, query=q, shares=shares, home_prefix=home_prefix
+    )
     return {"documents": items, "count": len(items), "total": totals}
 
 

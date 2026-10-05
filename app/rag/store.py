@@ -110,6 +110,44 @@ def normalize_vector(vector: np.ndarray) -> np.ndarray:
     return vector / norm if norm > 0 else vector
 
 
+def _escape_like(value: str) -> str:
+    """Neutralise les jokers LIKE (`%` et `_`) d'un préfixe de chemin.
+
+    Les noms de comptes DSM acceptent le tiret bas, qui remplacerait n'importe
+    quel caractère dans un `LIKE` : sans échappement, `/homes/jean_dupont/`
+    engloberait aussi `/homes/jeanXdupont/`.
+    """
+    for char in ("\\", "%", "_"):
+        value = value.replace(char, "\\" + char)
+    return value
+
+
+def _visibility_condition(
+    shares: set[str] | None, home_prefix: str = "", alias: str = "d."
+) -> tuple[str, list]:
+    """Condition SQL restreignant les documents à ce qu'un utilisateur peut voir.
+
+    `shares` énumère les partages visibles ; `home_prefix` désigne le dossier
+    personnel tel qu'il est *indexé* (`/homes/<compte>`), que DSM ne fait jamais
+    apparaître dans la liste des partages de l'utilisateur. Retourne `("", [])`
+    quand aucun filtrage n'est demandé, et `("0", [])` quand l'utilisateur ne
+    peut rien voir.
+    """
+    if shares is None:
+        return "", []
+    conditions, params = [], []
+    if shares:
+        placeholders = ",".join("?" for _ in shares)
+        conditions.append(f"LOWER({alias}share) IN ({placeholders})")
+        params.extend(sorted(shares))
+    if home_prefix:
+        conditions.append(f"LOWER({alias}dsm_path) LIKE ? ESCAPE '\\'")
+        params.append(_escape_like(home_prefix.rstrip("/").lower()) + "/%")
+    if not conditions:
+        return "0", []
+    return f"({' OR '.join(conditions)})", params
+
+
 class DocumentStore:
     """Accès thread-safe à l'index SQLite."""
 
@@ -357,17 +395,24 @@ class DocumentStore:
         }
 
     def list_documents(
-        self, *, limit: int = 100, offset: int = 0, query: str = "", shares: set[str] | None = None
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        query: str = "",
+        shares: set[str] | None = None,
+        home_prefix: str = "",
     ) -> list[dict]:
         clauses, params = [], []
         if query:
             clauses.append("(name LIKE ? OR dsm_path LIKE ?)")
             params.extend([f"%{query}%", f"%{query}%"])
-        if shares is not None:
-            if not shares:
+        scope, scope_params = _visibility_condition(shares, home_prefix, alias="")
+        if scope:
+            if scope == "0":
                 return []
-            clauses.append(f"LOWER(share) IN ({','.join('?' for _ in shares)})")
-            params.extend(sorted(shares))
+            clauses.append(scope)
+            params.extend(scope_params)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.extend([limit, offset])
         with self._lock:
@@ -382,17 +427,20 @@ class DocumentStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def count_documents(self, *, query: str = "", shares: set[str] | None = None) -> dict:
+    def count_documents(
+        self, *, query: str = "", shares: set[str] | None = None, home_prefix: str = ""
+    ) -> dict:
         """Totaux restreints aux partages visibles, pour ne rien révéler du reste de l'index."""
         clauses, params = ["d.status = 'ok'"], []
         if query:
             clauses.append("(d.name LIKE ? OR d.dsm_path LIKE ?)")
             params.extend([f"%{query}%", f"%{query}%"])
-        if shares is not None:
-            if not shares:
+        scope, scope_params = _visibility_condition(shares, home_prefix)
+        if scope:
+            if scope == "0":
                 return {"documents": 0, "chunks": 0}
-            clauses.append(f"LOWER(d.share) IN ({','.join('?' for _ in shares)})")
-            params.extend(sorted(shares))
+            clauses.append(scope)
+            params.extend(scope_params)
         where = " AND ".join(clauses)
         with self._lock:
             row = self._conn.execute(
@@ -448,21 +496,23 @@ class DocumentStore:
         return row["text"] if row else ""
 
     # -------------------------------------------------------------- recherche
-    def _allowed_share_clause(self, shares: set[str] | None) -> tuple[str, list]:
-        if shares is None:
-            return "", []
-        if not shares:
-            return "AND 0", []
-        placeholders = ",".join("?" for _ in shares)
-        return f"AND LOWER(d.share) IN ({placeholders})", sorted(shares)
+    def _allowed_share_clause(
+        self, shares: set[str] | None, home_prefix: str = ""
+    ) -> tuple[str, list]:
+        condition, params = _visibility_condition(shares, home_prefix)
+        return (f"AND {condition}" if condition else ""), params
 
     def search_lexical(
-        self, query: str, limit: int, shares: set[str] | None = None
+        self,
+        query: str,
+        limit: int,
+        shares: set[str] | None = None,
+        home_prefix: str = "",
     ) -> list[SearchHit]:
         match = build_fts_query(query)
         if not match:
             return []
-        clause, params = self._allowed_share_clause(shares)
+        clause, params = self._allowed_share_clause(shares, home_prefix)
         sql = f"""
             SELECT c.id AS chunk_id, c.document_id, c.text, c.ordinal, c.location,
                    d.real_path, d.dsm_path, d.share, d.name, d.mtime,
@@ -517,7 +567,11 @@ class DocumentStore:
         return self._vectors
 
     def search_semantic(
-        self, embedding: np.ndarray, limit: int, shares: set[str] | None = None
+        self,
+        embedding: np.ndarray,
+        limit: int,
+        shares: set[str] | None = None,
+        home_prefix: str = "",
     ) -> list[SearchHit]:
         cache = self._vector_matrix()
         if cache.matrix.size == 0 or embedding is None:
@@ -538,7 +592,7 @@ class DocumentStore:
         chunk_ids = [int(cache.ids[i]) for i in top]
         score_by_id = {int(cache.ids[i]): float(scores[i]) for i in top}
 
-        clause, params = self._allowed_share_clause(shares)
+        clause, params = self._allowed_share_clause(shares, home_prefix)
         placeholders = ",".join("?" for _ in chunk_ids)
         with self._lock:
             rows = self._conn.execute(

@@ -18,6 +18,11 @@ logger = logging.getLogger(__name__)
 
 _VOLUME_RE = re.compile(r"^/volume(?:USB)?\d+(?:/|$)", re.IGNORECASE)
 
+#: Partage DSM regroupant les dossiers personnels, visible des seuls administrateurs.
+HOMES_SHARE = "/homes"
+#: Alias sous lequel DSM présente à chaque utilisateur son propre dossier personnel.
+HOME_SHARE = "/home"
+
 
 def normalize(path: str) -> str:
     """Normalise un chemin POSIX (séparateurs, doublons, slash final)."""
@@ -29,6 +34,39 @@ def normalize(path: str) -> str:
     if len(cleaned) > 1:
         cleaned = cleaned.rstrip("/")
     return cleaned
+
+
+def home_owner(dsm_path: str) -> str:
+    """Compte propriétaire d'un chemin situé sous `/homes`, sinon chaîne vide."""
+    parts = [part for part in normalize(dsm_path).split("/") if part]
+    if len(parts) >= 2 and parts[0].lower() == HOMES_SHARE.strip("/"):
+        return parts[1]
+    return ""
+
+
+def home_prefix_for(account: str) -> str:
+    """Chemin sous lequel l'index connaît le dossier personnel d'un compte."""
+    account = (account or "").strip().strip("/")
+    return f"{HOMES_SHARE}/{account}" if account else ""
+
+
+def to_personal_view(dsm_path: str, account: str) -> str:
+    """Traduit `/homes/<compte>/x` en `/home/x` pour son propriétaire.
+
+    DSM ne présente jamais `/homes` à un utilisateur ordinaire : son dossier
+    personnel lui apparaît sous l'alias `/home`. Un document indexé sous
+    `/homes/alice/notes.pdf` doit donc être vérifié sous le nom
+    `/home/notes.pdf` quand c'est Alice qui interroge, faute de quoi le partage
+    racine serait introuvable dans sa liste et le document masqué à tort.
+
+    Tout autre chemin est renvoyé inchangé : le dossier personnel d'un tiers
+    reste donc sous `/homes/<tiers>`, que seuls les administrateurs voient.
+    """
+    owner = home_owner(dsm_path)
+    if not owner or not account or owner.lower() != account.lower():
+        return normalize(dsm_path)
+    remainder = [part for part in normalize(dsm_path).split("/") if part][2:]
+    return normalize("/".join([HOME_SHARE, *remainder]))
 
 
 @dataclass

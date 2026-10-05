@@ -11,6 +11,13 @@ Deux niveaux de filtrage sont appliqués, dans cet ordre :
 
 La stratégie est systématiquement *fail-closed* : en cas de doute ou d'erreur,
 le document est masqué.
+
+**Dossiers personnels.** DSM présente à chaque utilisateur son propre dossier
+sous l'alias `/home`, tandis que le compte de service qui indexe voit le partage
+parent `/homes`. Les deux niveaux ci-dessus traduisent donc `/homes/<compte>`
+en `/home` pour le propriétaire du dossier — et pour lui seul. Le dossier d'un
+tiers conserve son nom `/homes/<tiers>`, absent de la liste des partages d'un
+utilisateur ordinaire, donc écarté dès le niveau 1.
 """
 
 from __future__ import annotations
@@ -22,7 +29,7 @@ from dataclasses import dataclass
 
 from .client import DSMClient, DSMError
 from .models import DSMSession, ShareInfo
-from .paths import PathMapper, normalize
+from .paths import HOME_SHARE, PathMapper, home_prefix_for, normalize, to_personal_view
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +76,19 @@ class AccessController:
     async def readable_share_paths(self, session: DSMSession) -> set[str]:
         return {share.key for share in await self.shares_for(session) if share.readable}
 
+    async def index_scope(self, session: DSMSession) -> tuple[set[str], str]:
+        """Périmètre de l'utilisateur **tel qu'il est stocké dans l'index**.
+
+        Retourne les partages visibles et, le cas échéant, le préfixe du dossier
+        personnel. Ce dernier est nécessaire parce que l'index enregistre les
+        documents personnels sous `/homes/<compte>` (vue du compte de service),
+        alors que l'utilisateur ne connaît que l'alias `/home` : un filtrage sur
+        les seuls partages les écarterait tous.
+        """
+        shares = await self.readable_share_paths(session)
+        home_prefix = home_prefix_for(session.account) if HOME_SHARE in shares else ""
+        return shares, home_prefix
+
     # -------------------------------------------------------------- filtrage
     async def filter_paths(self, session: DSMSession, dsm_paths: list[str]) -> set[str]:
         """Retourne le sous-ensemble de `dsm_paths` que l'utilisateur peut lire."""
@@ -77,9 +97,14 @@ class AccessController:
             return set()
 
         allowed_shares = await self.readable_share_paths(session)
+        # DSM présente le dossier personnel de l'utilisateur sous l'alias « /home »,
+        # alors que l'index le connaît sous « /homes/<compte> » (vue du compte de
+        # service). On contrôle donc chaque chemin sous le nom que DSM montre à
+        # *cet* utilisateur, tout en continuant à renvoyer le chemin indexé.
+        views = {path: to_personal_view(path, session.account) for path in candidates}
         # Niveau 1 : le partage racine doit être visible.
         level1 = [
-            path for path in candidates if PathMapper.share_of(path).lower() in allowed_shares
+            path for path in candidates if PathMapper.share_of(views[path]).lower() in allowed_shares
         ]
         if not level1 or not self._strict:
             return set(level1)
@@ -89,7 +114,7 @@ class AccessController:
         resolved: set[str] = set()
         to_check: list[str] = []
         for path in level1:
-            entry = self._path_cache.get((session.sid, path))
+            entry = self._path_cache.get((session.sid, views[path]))
             if entry and entry.expires_at > now:
                 if entry.value:
                     resolved.add(path)
@@ -98,20 +123,27 @@ class AccessController:
 
         for batch_start in range(0, len(to_check), BATCH_SIZE):
             batch = to_check[batch_start : batch_start + BATCH_SIZE]
+            # Plusieurs chemins indexés ne peuvent pas partager une même vue : la
+            # traduction est injective, mais on reste défensif sur les doublons.
+            by_view: dict[str, list[str]] = {}
+            for path in batch:
+                by_view.setdefault(views[path], []).append(path)
             try:
-                verdicts = await self._client.stat_paths(session.sid, batch)
+                verdicts = await self._client.stat_paths(session.sid, list(by_view))
             except DSMError as exc:
                 if exc.is_session_expired:
                     raise
                 logger.warning("Vérification ACL impossible : %s", exc)
-                verdicts = dict.fromkeys(batch, False)
+                verdicts = dict.fromkeys(by_view, False)
             async with self._lock:
-                self._evict_if_needed(len(batch))
-                for path, allowed in verdicts.items():
-                    self._path_cache[(session.sid, path)] = _CacheEntry(
+                self._evict_if_needed(len(by_view))
+                for view, allowed in verdicts.items():
+                    self._path_cache[(session.sid, view)] = _CacheEntry(
                         value=allowed, expires_at=now + self._ttl
                     )
-            resolved.update(path for path, allowed in verdicts.items() if allowed)
+            for view, allowed in verdicts.items():
+                if allowed:
+                    resolved.update(by_view.get(view, []))
         return resolved
 
     async def can_read(self, session: DSMSession, dsm_path: str) -> bool:

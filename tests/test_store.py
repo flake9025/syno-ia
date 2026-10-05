@@ -135,6 +135,83 @@ def test_liste_des_documents_filtre_par_partage(store: DocumentStore):
     assert len(store.list_documents(shares=None)) == 2
 
 
+# ------------------------------------------------- dossiers personnels
+def add_home(store: DocumentStore, owner: str, name: str, texts: list[str], dim: int = 4):
+    """Document personnel, indexé sous « /homes/<compte> » comme le voit le compte de service."""
+    record = DocumentRecord(
+        real_path=f"/volume1/homes/{owner}/{name}",
+        dsm_path=f"/homes/{owner}/{name}",
+        share="/homes",
+        name=name,
+        ext=".txt",
+        size=len(" ".join(texts)),
+        mtime=1700000000,
+        content_hash=f"hash-{owner}-{name}",
+    )
+    chunks = [
+        Chunk(text=text, ordinal=i, location=f"page {i + 1}", embedding=np.full(dim, i + 1.0))
+        for i, text in enumerate(texts)
+    ]
+    return store.upsert_document(record, chunks)
+
+
+def test_dossier_personnel_visible_par_son_proprietaire(store: DocumentStore):
+    add_home(store, "alice", "notes.txt", ["budget prévisionnel"])
+    hits = store.search_lexical(
+        "budget", limit=10, shares={"/documents"}, home_prefix="/homes/alice"
+    )
+    assert [hit.dsm_path for hit in hits] == ["/homes/alice/notes.txt"]
+
+
+def test_dossier_personnel_invisible_sans_prefixe(store: DocumentStore):
+    """Sans préfixe personnel, le partage « /homes » n'étant pas visible, rien ne sort."""
+    add_home(store, "alice", "notes.txt", ["budget prévisionnel"])
+    assert store.search_lexical("budget", limit=10, shares={"/documents"}) == []
+
+
+def test_prefixe_personnel_n_expose_pas_les_autres(store: DocumentStore):
+    add_home(store, "alice", "notes.txt", ["budget prévisionnel"])
+    add_home(store, "bob", "notes.txt", ["budget prévisionnel"])
+    hits = store.search_lexical(
+        "budget", limit=10, shares={"/documents"}, home_prefix="/homes/alice"
+    )
+    assert [hit.dsm_path for hit in hits] == ["/homes/alice/notes.txt"]
+
+
+def test_tiret_bas_du_compte_n_est_pas_un_joker(store: DocumentStore):
+    """« _ » est un joker LIKE : sans échappement, jean_dupont verrait jeanXdupont."""
+    add_home(store, "jeanXdupont", "notes.txt", ["budget prévisionnel"])
+    hits = store.search_lexical(
+        "budget", limit=10, shares=set(), home_prefix="/homes/jean_dupont"
+    )
+    assert hits == []
+
+
+def test_dossier_personnel_dans_la_recherche_semantique(store: DocumentStore):
+    add_home(store, "alice", "notes.txt", ["budget prévisionnel"])
+    add_home(store, "bob", "notes.txt", ["budget prévisionnel"])
+    hits = store.search_semantic(
+        np.full(4, 1.0), limit=10, shares=set(), home_prefix="/homes/alice"
+    )
+    assert [hit.dsm_path for hit in hits] == ["/homes/alice/notes.txt"]
+
+
+def test_totaux_incluent_le_dossier_personnel(store: DocumentStore):
+    add(store, "a.txt", ["alpha"], share="/documents")
+    add_home(store, "alice", "notes.txt", ["budget"])
+    add_home(store, "bob", "notes.txt", ["budget"])
+    totaux = store.count_documents(shares={"/documents"}, home_prefix="/homes/alice")
+    assert totaux["documents"] == 2
+
+
+def test_liste_inclut_le_dossier_personnel(store: DocumentStore):
+    add(store, "a.txt", ["alpha"], share="/documents")
+    add_home(store, "alice", "notes.txt", ["budget"])
+    add_home(store, "bob", "notes.txt", ["budget"])
+    chemins = {doc["dsm_path"] for doc in store.list_documents(shares=set(), home_prefix="/homes/alice")}
+    assert chemins == {"/homes/alice/notes.txt"}
+
+
 # ------------------------------------------------- rattrapage des vecteurs
 def add_sans_vecteur(store: DocumentStore, name: str, texts: list[str], share: str = "/documents"):
     record = DocumentRecord(
