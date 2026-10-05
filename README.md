@@ -25,16 +25,14 @@ ne peut pas remonter dans les réponses.*
 
 - [Pourquoi ce projet](#pourquoi-ce-projet)
 - [Fonctionnalités](#fonctionnalités)
+- [Configuration DSM](#configuration-dsm)
+- [Installation sur le NAS](#installation-sur-le-nas)
 - [Modèle de sécurité](#modèle-de-sécurité)
 - [Prérequis](#prérequis)
 - [Profils matériels et choix des modèles](#profils-matériels-et-choix-des-modèles)
-- [Configuration DSM](#configuration-dsm)
-- [Installation sur le NAS](#installation-sur-le-nas)
 - [Variables d'environnement](#variables-denvironnement)
 - [Utilisation](#utilisation)
 - [Architecture](#architecture)
-- [Développement](#développement)
-- [Déploiement continu](#déploiement-continu)
 - [Dépannage](#dépannage)
 - [Limites connues](#limites-connues)
 - [Licence](#licence)
@@ -74,6 +72,233 @@ C'est exactement le problème que `syno-ia` résout.
   pertinents. Utile sur un NAS vraiment modeste.
 - 🌍 **Interface français / anglais**, thème clair / sombre, sans étape de build.
 - 🐳 **Un seul conteneur**, aucune base externe, aucun service tiers obligatoire.
+
+---
+
+## Configuration DSM
+
+> Ces quatre étapes sont à réaliser **avant** l'installation : le conteneur a besoin
+> du compte de service dès son premier démarrage, et refusera de dialoguer avec DSM
+> tant que les droits et le pare-feu ne sont pas en place.
+
+### 1. Créer un compte de service
+
+**Panneau de configuration → Utilisateur et groupe → Créer**
+
+- Nom : **`syno-ia-svc`** — c'est la valeur déjà inscrite dans `.env.example` ; en la
+  réutilisant telle quelle, vous n'aurez que le mot de passe à renseigner.
+- Mot de passe : long et aléatoire
+- **Permissions de dossier partagé** : *lecture seule* sur les partages à indexer, *aucun
+  accès* ailleurs. Le compte n'a pas besoin d'être administrateur.
+- **Applications** : autorisez **File Station**. C'est indispensable — sans ce droit,
+  toutes les requêtes échouent avec le code `160`.
+- Désactivez la double authentification pour ce compte de service (sinon la connexion
+  automatique est impossible).
+
+Reportez le mot de passe dans `.env` (`DSM_SERVICE_PASSWORD`) ; `DSM_SERVICE_ACCOUNT` y
+vaut déjà `syno-ia-svc`.
+
+### 2. Autoriser les utilisateurs
+
+Les utilisateurs qui se connecteront à `syno-ia` doivent eux aussi avoir le droit
+d'application **File Station** — c'est ce droit qui permet à `syno-ia` de vérifier leurs
+permissions en leur nom.
+
+### 3. Pare-feu et Auto Block
+
+Le conteneur joint DSM par la passerelle du bridge Docker (`172.17.0.1:5000`).
+
+- **Panneau de configuration → Sécurité → Pare-feu** : si un pare-feu est actif, ajoutez
+  une règle d'autorisation pour la source `172.17.0.0/16` vers le port `5000`, **au-dessus**
+  de toute règle de blocage.
+- **Panneau de configuration → Sécurité → Protection → Blocage auto** : ajoutez
+  `172.17.0.0/16` à la **liste d'autorisation**. Tous les conteneurs partagent cette
+  adresse source : sans cela, un autre conteneur qui échoue ses connexions pourrait faire
+  bloquer `syno-ia` — et réciproquement.
+
+`syno-ia` limite lui-même les dégâts : après un refus d'identifiants du compte de service,
+il **cesse** de réessayer jusqu'à une reconnexion manuelle depuis le panneau
+d'administration.
+
+### 4. HTTPS
+
+Par défaut, `DSM_URL=http://172.17.0.1:5000` : le trafic ne quitte pas la machine. Pour
+utiliser HTTPS, mettez `https://172.17.0.1:5001` et laissez `DSM_VERIFY_SSL=false` si le
+certificat DSM est auto-signé.
+
+Pour exposer `syno-ia` lui-même en HTTPS — une fois l'application installée — placez-le
+derrière le **Reverse Proxy** de DSM (Panneau de configuration → Portail de connexion →
+Reverse Proxy) en activant `WebSocket`/`HTTP/1.1` et en désactivant la mise en tampon des
+réponses (le chat utilise des flux SSE).
+
+---
+
+## Installation sur le NAS
+
+Le compte de service de l'étape précédente doit exister : notez son nom et son mot de
+passe, ils sont demandés dans le fichier `.env`.
+
+> **Si vous déployez votre propre fork.** GitHub publie les paquets GHCR en *privé* par
+> défaut, même pour un dépôt public : le NAS recevrait alors `unauthorized` au
+> `docker pull`. Après la première exécution réussie du workflow, passez le paquet en
+> *Public* depuis ses réglages
+> (`https://github.com/users/<vous>/packages/container/syno-ia/settings`), ou exportez
+> `GHCR_USER` et `GHCR_TOKEN` (portée `read:packages`) avant d'appeler
+> `deploy/deploy-nas.sh`. L'image officielle de ce dépôt est déjà publique.
+
+### Quels dossiers seront indexés ?
+
+**Rien n'est indexé automatiquement.** L'application ne lit que les dossiers déclarés dans
+`INDEX_ROOTS`, dont la valeur par défaut est `/volume1/homes` — les dossiers personnels.
+Aucun autre partage du NAS n'est touché tant que vous ne l'ajoutez pas : un partage absent
+de cette liste reste totalement invisible, pour tout le monde.
+
+Les permissions interviennent **ensuite** : parmi les dossiers indexés, chaque utilisateur
+ne voit que ce que DSM l'autorise à lire. Déclarer un partage ne le rend donc pas public,
+mais ne pas le déclarer le rend définitivement absent.
+
+**Faut-il monter ces dossiers ?** Deux modes, au choix :
+
+| | `INDEX_MODE=mount` *(défaut)* | `INDEX_MODE=filestation` |
+|---|---|---|
+| Montages `-v` | un par partage à indexer | **aucun** |
+| Lecture des fichiers | directe sur le disque | via l'API DSM (compte de service) |
+| Vitesse d'indexation | rapide | plus lente, plus de réseau |
+| Sécurité | **identique** : les ACL DSM sont rejouées dans les deux cas | |
+
+Le mode `mount` est recommandé sur un DS218+, dont le CPU est déjà limité. Si vous
+préférez ne rien monter, passez simplement `INDEX_MODE=filestation` et omettez les `-v`
+de partage (celui de `/app/data` reste nécessaire).
+
+> **Les dossiers personnels (`homes`) sont indexés par défaut.**
+> Chaque utilisateur y retrouve **ses propres documents**, et uniquement les siens.
+> DSM présente le dossier personnel sous l'alias `/home`, alors que le compte de service
+> qui indexe voit le partage parent `/homes` ; `syno-ia` rejoue cette traduction au moment
+> du contrôle d'accès, si bien qu'un seul index suffit — les dossiers partagés ne sont
+> jamais indexés en double. Le dossier d'un tiers reste `/homes/<tiers>`, nom qui n'existe
+> pas pour un utilisateur ordinaire : il est écarté avant même d'interroger DSM.
+> Seul un **administrateur**, à qui DSM montre `/homes`, y a accès — comme dans File Station.
+>
+> Prérequis : le service **Dossier personnel utilisateur** doit être activé dans DSM
+> (*Panneau de configuration → Utilisateur et groupe → Avancé*). En mode `filestation`, le
+> compte de service doit en outre appartenir au groupe **administrators** pour parcourir
+> `/homes` ; en mode `mount`, la lecture se fait sur le disque et aucun droit particulier
+> n'est requis.
+
+### Installation par SSH
+
+```bash
+ssh admin@<ip-du-nas>
+
+sudo mkdir -p /volume1/docker/apps/syno-ia/data
+cd /volume1/docker/apps/syno-ia
+
+# 1. Configuration de départ
+curl -fsSL https://raw.githubusercontent.com/flake9025/syno-ia/main/.env.example -o .env
+
+# 2. Clé de signature des sessions (à générer avant le premier démarrage)
+echo "APP_SECRET=$(openssl rand -hex 32)" >> .env
+
+# 3. Mot de passe du compte de service créé à l'étape « Configuration DSM »
+vi .env          # DSM_SERVICE_PASSWORD
+
+# 4. Démarrage — cette commande fonctionne telle quelle
+sudo docker run -d \
+  --name syno-ia \
+  -p 8083:8080 \
+  --env-file /volume1/docker/apps/syno-ia/.env \
+  -e INDEX_MODE=mount \
+  -e INDEX_ROOTS=/volume1/homes \
+  -v /volume1/docker/apps/syno-ia/data:/app/data \
+  -v /volume1/homes:/volume1/homes:ro \
+  --memory=5g \
+  --restart unless-stopped \
+  ghcr.io/flake9025/syno-ia:latest
+```
+
+Par défaut, `syno-ia` indexe les **dossiers personnels** : `/volume1/homes` existe sur
+tout NAS dont le service *Dossier personnel utilisateur* est activé, et chaque utilisateur
+n'y retrouvera que les siens. Rien à adapter.
+
+Pour ajouter des **dossiers partagés**, repérez d'abord leurs noms exacts :
+
+```bash
+ls -1 /volume1/
+```
+
+Vous obtenez la liste réelle de vos partages — `Documents`, `Projets`, `photo`… Ajoutez
+ceux qui vous intéressent à `INDEX_ROOTS` (séparés par des virgules) et montez-les chacun,
+en respectant la casse :
+
+```bash
+  -e INDEX_ROOTS=/volume1/homes,/volume1/Documents,/volume1/Projets \
+  -v /volume1/homes:/volume1/homes:ro \
+  -v /volume1/Documents:/volume1/Documents:ro \
+  -v /volume1/Projets:/volume1/Projets:ro \
+```
+
+Ouvrez ensuite `http://<ip-du-nas>:8083` et connectez-vous avec **votre compte DSM
+habituel** — pas avec le compte de service, qui ne sert qu'aux vérifications internes.
+
+> ⚠️ **Montez chaque partage au chemin identique à celui du NAS.**
+> La syntaxe est `-v <chemin sur le NAS>:<chemin dans le conteneur>:ro`, et les deux
+> doivent être **les mêmes** : `-v /volume1/Projets:/volume1/Projets:ro`. Cette identité
+> est ce qui permet de faire correspondre un fichier indexé à son chemin DSM, donc de
+> rejouer ses ACL. Un montage vers `/data/docs` casserait cette correspondance.
+> Le suffixe `:ro` monte en lecture seule : l'application ne peut jamais écrire dans vos
+> documents.
+>
+> Vous n'indexez que ce que vous montez : un partage absent de cette liste reste
+> totalement invisible, pour tout le monde.
+
+### Variante avec LLM 100 % local
+
+Même commande, avec l'image `:latest-llm` — elle embarque `llama.cpp` compilé **sans
+AVX**, seule variante qui fonctionne sur les Celeron « Apollo Lake » (DS218+, DS718+,
+DS918+) :
+
+```bash
+# 4 bis. Démarrage avec LLM local
+sudo docker run -d \
+  --name syno-ia \
+  -p 8083:8080 \
+  --env-file /volume1/docker/apps/syno-ia/.env \
+  -e INDEX_MODE=mount \
+  -e INDEX_ROOTS=/volume1/homes \
+  -v /volume1/docker/apps/syno-ia/data:/app/data \
+  -v /volume1/homes:/volume1/homes:ro \
+  --memory=5g \
+  --restart unless-stopped \
+  ghcr.io/flake9025/syno-ia:latest-llm
+```
+
+Puis, depuis le panneau d'administration, onglet **Modèles** : *Télécharger le modèle
+recommandé*. Le fichier GGUF (~1 Go pour le profil `small`) est stocké dans
+`/app/data/models` et survit aux mises à jour.
+
+Tant que le modèle n'est pas téléchargé, `LLM_BACKEND=auto` laisse l'application en mode
+extractif ; elle bascule toute seule sur `llamacpp` dès que le fichier est présent.
+
+### Variante sans aucun montage
+
+Mêmes paramètres, mais `INDEX_MODE=filestation` et plus aucun montage de partage — seul
+celui des données de l'application subsiste :
+
+```bash
+sudo docker run -d \
+  --name syno-ia \
+  -p 8083:8080 \
+  --env-file /volume1/docker/apps/syno-ia/.env \
+  -e INDEX_MODE=filestation \
+  -e INDEX_ROOTS=/volume1/homes \
+  -v /volume1/docker/apps/syno-ia/data:/app/data \
+  --memory=5g \
+  --restart unless-stopped \
+  ghcr.io/flake9025/syno-ia:latest
+```
+
+`INDEX_ROOTS` reste obligatoire : il désigne toujours les dossiers à parcourir, qui sont
+cette fois lus par l'API DSM au lieu du disque.
 
 ---
 
@@ -212,231 +437,6 @@ Le profil peut être forcé : `HARDWARE_PROFILE=micro|small|medium|large`.
 
 ---
 
-## Configuration DSM
-
-> Ces quatre étapes sont à réaliser **avant** l'installation : le conteneur a besoin
-> du compte de service dès son premier démarrage, et refusera de dialoguer avec DSM
-> tant que les droits et le pare-feu ne sont pas en place.
-
-### 1. Créer un compte de service
-
-**Panneau de configuration → Utilisateur et groupe → Créer**
-
-- Nom : `syno-ia-svc` (par exemple)
-- Mot de passe : long et aléatoire
-- **Permissions de dossier partagé** : *lecture seule* sur les partages à indexer, *aucun
-  accès* ailleurs. Le compte n'a pas besoin d'être administrateur.
-- **Applications** : autorisez **File Station**. C'est indispensable — sans ce droit,
-  toutes les requêtes échouent avec le code `160`.
-- Désactivez la double authentification pour ce compte de service (sinon la connexion
-  automatique est impossible).
-
-Reportez ces identifiants dans `.env` (`DSM_SERVICE_ACCOUNT`, `DSM_SERVICE_PASSWORD`).
-
-### 2. Autoriser les utilisateurs
-
-Les utilisateurs qui se connecteront à `syno-ia` doivent eux aussi avoir le droit
-d'application **File Station** — c'est ce droit qui permet à `syno-ia` de vérifier leurs
-permissions en leur nom.
-
-### 3. Pare-feu et Auto Block
-
-Le conteneur joint DSM par la passerelle du bridge Docker (`172.17.0.1:5000`).
-
-- **Panneau de configuration → Sécurité → Pare-feu** : si un pare-feu est actif, ajoutez
-  une règle d'autorisation pour la source `172.17.0.0/16` vers le port `5000`, **au-dessus**
-  de toute règle de blocage.
-- **Panneau de configuration → Sécurité → Protection → Blocage auto** : ajoutez
-  `172.17.0.0/16` à la **liste d'autorisation**. Tous les conteneurs partagent cette
-  adresse source : sans cela, un autre conteneur qui échoue ses connexions pourrait faire
-  bloquer `syno-ia` — et réciproquement.
-
-`syno-ia` limite lui-même les dégâts : après un refus d'identifiants du compte de service,
-il **cesse** de réessayer jusqu'à une reconnexion manuelle depuis le panneau
-d'administration.
-
-### 4. HTTPS
-
-Par défaut, `DSM_URL=http://172.17.0.1:5000` : le trafic ne quitte pas la machine. Pour
-utiliser HTTPS, mettez `https://172.17.0.1:5001` et laissez `DSM_VERIFY_SSL=false` si le
-certificat DSM est auto-signé.
-
-Pour exposer `syno-ia` lui-même en HTTPS — une fois l'application installée — placez-le
-derrière le **Reverse Proxy** de DSM (Panneau de configuration → Portail de connexion →
-Reverse Proxy) en activant `WebSocket`/`HTTP/1.1` et en désactivant la mise en tampon des
-réponses (le chat utilise des flux SSE).
-
----
-
-## Installation sur le NAS
-
-Le compte de service de l'étape précédente doit exister : notez son nom et son mot de
-passe, ils sont demandés dans le fichier `.env`.
-
-> **Si vous déployez votre propre fork.** GitHub publie les paquets GHCR en *privé* par
-> défaut, même pour un dépôt public : le NAS recevrait alors `unauthorized` au
-> `docker pull`. Après la première exécution réussie du workflow, passez le paquet en
-> *Public* depuis ses réglages
-> (`https://github.com/users/<vous>/packages/container/syno-ia/settings`), ou exportez
-> `GHCR_USER` et `GHCR_TOKEN` (portée `read:packages`) avant d'appeler
-> `deploy/deploy-nas.sh`. L'image officielle de ce dépôt est déjà publique.
-
-### Quels dossiers seront indexés ?
-
-**Rien n'est indexé automatiquement.** L'application ne lit que les dossiers que vous
-déclarez explicitement dans `INDEX_ROOTS` — ni les homes des utilisateurs, ni les autres
-partages du NAS, ni quoi que ce soit d'autre. Un partage que vous n'y mettez pas reste
-totalement invisible, pour tout le monde.
-
-Les permissions interviennent **ensuite** : parmi les dossiers indexés, chaque utilisateur
-ne voit que ce que DSM l'autorise à lire. Déclarer un partage ne le rend donc pas public,
-mais ne pas le déclarer le rend définitivement absent.
-
-**Faut-il monter ces dossiers ?** Deux modes, au choix :
-
-| | `INDEX_MODE=mount` *(défaut)* | `INDEX_MODE=filestation` |
-|---|---|---|
-| Montages `-v` | un par partage à indexer | **aucun** |
-| Lecture des fichiers | directe sur le disque | via l'API DSM (compte de service) |
-| Vitesse d'indexation | rapide | plus lente, plus de réseau |
-| Sécurité | **identique** : les ACL DSM sont rejouées dans les deux cas | |
-
-Le mode `mount` est recommandé sur un DS218+, dont le CPU est déjà limité. Si vous
-préférez ne rien monter, passez simplement `INDEX_MODE=filestation` et omettez les `-v`
-de partage (celui de `/app/data` reste nécessaire).
-
-> **Les dossiers personnels (`homes`) sont pris en charge.**
-> Ajoutez `/volume1/homes` à `INDEX_ROOTS` et montez-le comme les autres partages :
-> chaque utilisateur retrouvera alors **ses propres documents**, et uniquement les siens.
-> DSM présente le dossier personnel sous l'alias `/home`, alors que le compte de service
-> qui indexe voit le partage parent `/homes` ; `syno-ia` rejoue cette traduction au moment
-> du contrôle d'accès, si bien qu'un seul index suffit — les dossiers partagés ne sont
-> jamais indexés en double. Le dossier d'un tiers reste `/homes/<tiers>`, nom qui n'existe
-> pas pour un utilisateur ordinaire : il est écarté avant même d'interroger DSM.
-> Seul un **administrateur**, à qui DSM montre `/homes`, y a accès — comme dans File Station.
->
-> En mode `filestation`, le compte de service doit appartenir au groupe **administrators**
-> pour pouvoir parcourir `/homes`. En mode `mount`, la lecture se fait directement sur le
-> disque et aucun droit particulier n'est requis. Le service **Dossier personnel
-> utilisateur** doit être activé dans DSM (*Panneau de configuration → Utilisateur et
-> groupe → Avancé*).
-
-### Installation par SSH
-
-```bash
-ssh admin@<ip-du-nas>
-
-sudo mkdir -p /volume1/docker/apps/syno-ia/data
-cd /volume1/docker/apps/syno-ia
-
-# 1. Configuration de départ
-curl -fsSL https://raw.githubusercontent.com/flake9025/syno-ia/main/.env.example -o .env
-
-# 2. Clé de signature des sessions (à générer avant le premier démarrage)
-echo "APP_SECRET=$(openssl rand -hex 32)" >> .env
-
-# 3. Compte de service créé à l'étape « Configuration DSM »
-vi .env          # DSM_SERVICE_ACCOUNT et DSM_SERVICE_PASSWORD
-
-# 4. Repérez les dossiers partagés à indexer
-ls -1 /volume1/
-```
-
-Cette dernière commande liste vos dossiers partagés : `Documents`, `Projets`, `photo`…
-**Ce sont ces noms-là qu'il faut utiliser ci-dessous** — `documents` n'est qu'un exemple,
-il n'existe pas forcément chez vous. Respectez la casse exacte.
-
-```bash
-# 5. Démarrage (remplacez « Documents » par vos partages)
-sudo docker run -d \
-  --name syno-ia \
-  -p 8083:8080 \
-  --env-file /volume1/docker/apps/syno-ia/.env \
-  -e INDEX_MODE=mount \
-  -e INDEX_ROOTS=/volume1/Documents \
-  -v /volume1/docker/apps/syno-ia/data:/app/data \
-  -v /volume1/Documents:/volume1/Documents:ro \
-  --memory=5g \
-  --restart unless-stopped \
-  ghcr.io/flake9025/syno-ia:latest
-```
-
-Pour indexer plusieurs partages, ajoutez-les à `INDEX_ROOTS` (séparés par des virgules) et
-montez-les chacun. `/volume1/homes` donne à chaque utilisateur l'accès à son dossier
-personnel — et à lui seul :
-
-```bash
-  -e INDEX_ROOTS=/volume1/Documents,/volume1/Projets,/volume1/homes \
-  -v /volume1/Documents:/volume1/Documents:ro \
-  -v /volume1/Projets:/volume1/Projets:ro \
-  -v /volume1/homes:/volume1/homes:ro \
-```
-
-Ouvrez ensuite `http://<ip-du-nas>:8083` et connectez-vous avec **votre compte DSM
-habituel** — pas avec le compte de service, qui ne sert qu'aux vérifications internes.
-
-> ⚠️ **Montez chaque partage au chemin identique à celui du NAS.**
-> La syntaxe est `-v <chemin sur le NAS>:<chemin dans le conteneur>:ro`, et les deux
-> doivent être **les mêmes** : `-v /volume1/Projets:/volume1/Projets:ro`. Cette identité
-> est ce qui permet de faire correspondre un fichier indexé à son chemin DSM, donc de
-> rejouer ses ACL. Un montage vers `/data/docs` casserait cette correspondance.
-> Le suffixe `:ro` monte en lecture seule : l'application ne peut jamais écrire dans vos
-> documents.
->
-> Vous n'indexez que ce que vous montez : un partage absent de cette liste reste
-> totalement invisible, pour tout le monde.
-
-### Variante avec LLM 100 % local
-
-Même commande, avec l'image `:latest-llm` — elle embarque `llama.cpp` compilé **sans
-AVX**, seule variante qui fonctionne sur les Celeron « Apollo Lake » (DS218+, DS718+,
-DS918+) :
-
-```bash
-# 5 bis. Démarrage avec LLM local (remplacez « Documents » par vos partages)
-sudo docker run -d \
-  --name syno-ia \
-  -p 8083:8080 \
-  --env-file /volume1/docker/apps/syno-ia/.env \
-  -e INDEX_MODE=mount \
-  -e INDEX_ROOTS=/volume1/Documents \
-  -v /volume1/docker/apps/syno-ia/data:/app/data \
-  -v /volume1/Documents:/volume1/Documents:ro \
-  --memory=5g \
-  --restart unless-stopped \
-  ghcr.io/flake9025/syno-ia:latest-llm
-```
-
-Puis, depuis le panneau d'administration, onglet **Modèles** : *Télécharger le modèle
-recommandé*. Le fichier GGUF (~1 Go pour le profil `small`) est stocké dans
-`/app/data/models` et survit aux mises à jour.
-
-Tant que le modèle n'est pas téléchargé, `LLM_BACKEND=auto` laisse l'application en mode
-extractif ; elle bascule toute seule sur `llamacpp` dès que le fichier est présent.
-
-### Variante sans aucun montage
-
-Mêmes paramètres, mais `INDEX_MODE=filestation` et plus aucun montage de partage — seul
-celui des données de l'application subsiste :
-
-```bash
-sudo docker run -d \
-  --name syno-ia \
-  -p 8083:8080 \
-  --env-file /volume1/docker/apps/syno-ia/.env \
-  -e INDEX_MODE=filestation \
-  -e INDEX_ROOTS=/volume1/Documents \
-  -v /volume1/docker/apps/syno-ia/data:/app/data \
-  --memory=5g \
-  --restart unless-stopped \
-  ghcr.io/flake9025/syno-ia:latest
-```
-
-`INDEX_ROOTS` reste obligatoire : il désigne toujours les dossiers à parcourir, qui sont
-cette fois lus par l'API DSM au lieu du disque.
-
----
-
 ## Variables d'environnement
 
 Fichier complet et commenté : [`.env.example`](.env.example). L'essentiel :
@@ -445,10 +445,10 @@ Fichier complet et commenté : [`.env.example`](.env.example). L'essentiel :
 |---|---|---|
 | `APP_SECRET` | *(aléatoire)* | Clé de signature des cookies. **À fixer** en production. |
 | `DSM_URL` | `http://172.17.0.1:5000` | DSM vu depuis le conteneur. |
-| `DSM_SERVICE_ACCOUNT` / `DSM_SERVICE_PASSWORD` | — | Compte de service pour l'indexation. |
+| `DSM_SERVICE_ACCOUNT` / `DSM_SERVICE_PASSWORD` | `syno-ia-svc` / — | Compte de service pour l'indexation. |
 | `ADMIN_ACCOUNTS` | *(vide)* | Comptes DSM admin de `syno-ia` en plus des admins DSM. |
 | `INDEX_MODE` | `mount` | `mount` (partages montés) ou `filestation` (API DSM). |
-| `INDEX_ROOTS` | `/volume1/documents` | Racines à indexer, séparées par des virgules. **À adapter à vos propres dossiers partagés** (`ls -1 /volume1/`), et à monter aux mêmes chemins. |
+| `INDEX_ROOTS` | `/volume1/homes` | Racines à indexer, séparées par des virgules. Par défaut les dossiers personnels ; ajoutez vos dossiers partagés (`ls -1 /volume1/`) et montez-les aux mêmes chemins. |
 | `INDEX_INTERVAL_MINUTES` | `360` | Réindexation automatique (`0` = désactivée). |
 | `ACL_STRICT` | `true` | Vérification fichier par fichier des ACL avancées. |
 | `ACL_CACHE_TTL` | `300` | Durée de vie d'une décision d'accès (secondes). |

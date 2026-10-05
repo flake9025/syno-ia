@@ -20,19 +20,19 @@ services:
       # Depuis un conteneur du NAS, la passerelle du bridge Docker atteint DSM.
       DSM_URL: "http://172.17.0.1:5000"
       INDEX_MODE: mount
-      # EXEMPLE À ADAPTER : remplacez « documents » par vos propres dossiers
-      # partagés (« ls -1 /volume1/ » en SSH), en respectant la casse.
-      INDEX_ROOTS: "/volume1/documents"
+      # Dossiers personnels : chaque utilisateur n'y retrouve que les siens.
+      # Pour ajouter des dossiers partagés (« ls -1 /volume1/ », casse comprise),
+      # complétez cette liste et montez chacun d'eux ci-dessous.
+      INDEX_ROOTS: "/volume1/homes"
     volumes:
       # Index SQLite + modèles téléchargés (doit survivre aux mises à jour).
       - /volume1/docker/apps/syno-ia/data:/app/data
       # Partages à indexer, montés **en lecture seule** et **au même chemin**
       # que sur le NAS : l'identité des chemins permet de rejouer les ACL DSM.
       # Un montage par partage, et chacun doit figurer dans INDEX_ROOTS.
-      - /volume1/documents:/volume1/documents:ro
+      - /volume1/homes:/volume1/homes:ro
+      # - /volume1/documents:/volume1/documents:ro
       # - /volume1/projets:/volume1/projets:ro
-      # Dossiers personnels : chaque utilisateur n'y verra que le sien.
-      # - /volume1/homes:/volume1/homes:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
       interval: 30s

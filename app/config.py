@@ -81,8 +81,9 @@ class Settings(BaseSettings):
     #:   - « filestation » : téléchargement via l'API FileStation (aucun montage).
     index_mode: str = "mount"
     #: Racines à indexer. En mode « mount », chemins réels du NAS montés à
-    #: l'identique dans le conteneur (ex. /volume1/documents).
-    index_roots: CsvList = Field(default_factory=lambda: ["/volume1/documents"])
+    #: l'identique dans le conteneur (ex. /volume1/documents). Par défaut, les
+    #: dossiers personnels : chaque utilisateur n'y retrouve que les siens.
+    index_roots: CsvList = Field(default_factory=lambda: ["/volume1/homes"])
     index_exclude_globs: CsvList = Field(
         default_factory=lambda: [
             "**/@eaDir/**",
