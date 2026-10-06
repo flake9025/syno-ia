@@ -478,7 +478,9 @@ jetons/seconde) : de quoi mesurer l'effet de ces réglages sans quitter l'interf
 Au-delà de `LLM_TIMEOUT_SECONDS` (120 s par défaut), la génération est **arrêtée net** et
 le texte déjà produit est conservé, accompagné d'un avertissement. Le NAS ne reste donc
 jamais bloqué sur une réponse interminable, et llama.cpp cesse aussitôt de consommer les
-cœurs. `0` lève la limite.
+cœurs. Si le délai expire **sans le moindre mot** — modèle trop lourd pour la machine —
+l'application bascule sur la réponse extractive et cite les passages trouvés : vous obtenez
+toujours quelque chose d'exploitable. `0` lève la limite.
 
 #### Faire de la place
 
@@ -510,7 +512,7 @@ Fichier complet et commenté : [`.env.example`](.env.example). L'essentiel :
 | `EMBEDDING_ASYNC_LOAD` | `true` | Charge le modèle en arrière-plan (voir [Premier démarrage](#premier-démarrage)). `false` rend le démarrage bloquant. |
 | `EMBEDDING_BACKFILL_BATCH` | `64` | Fragments vectorisés par lot lors du rattrapage. |
 | `LLM_BACKEND` | `auto` | `auto`, `llamacpp`, `ollama`, `openai`, `none`. |
-| `LLM_TIMEOUT_SECONDS` | `120` | Délai maximal d'une génération ; au-delà, la réponse est tronquée proprement (`0` = sans limite). |
+| `LLM_TIMEOUT_SECONDS` | `120` | Délai maximal d'une génération ; au-delà, la réponse est tronquée proprement, ou remplacée par les extraits trouvés si aucun mot n'a été produit (`0` = sans limite). |
 | `OLLAMA_URL` | `http://172.17.0.1:11434` | Ollama local ou distant. |
 | `OPENAI_API_KEY` | *(vide)* | Service compatible OpenAI. |
 | `HARDWARE_PROFILE` | `auto` | Forçage du profil (`nano`…`large`). |

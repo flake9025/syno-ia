@@ -391,6 +391,39 @@ def test_chat_annonce_le_moteur_et_les_durees(client: TestClient):
     assert final["timing"]["total_ms"] >= final["timing"]["first_token_ms"]
 
 
+class LLMMuet:
+    """Moteur qui ne rend jamais la main : simule un NAS qui s'enlise."""
+
+    available = True
+
+    def describe(self) -> dict:
+        return {"backend": "llamacpp", "model": "modele-lent.gguf"}
+
+    async def aclose(self) -> None:
+        return None
+
+    async def stream(self, messages, **kwargs) -> AsyncIterator[str]:
+        await asyncio.sleep(3600)
+        yield "jamais produit"  # pragma: no cover - le délai tombe avant
+
+
+def test_delai_depasse_sans_jeton_bascule_en_extractif(client: TestClient):
+    """Plutôt qu'une bulle vide, l'utilisateur reçoit les passages trouvés."""
+    connexion(client)
+    context = client.app.state.context
+    context.llm = LLMMuet()
+    context.settings.llm_timeout_seconds = 1
+
+    with client.stream("POST", "/api/chat", json={"question": "sauvegarde"}) as response:
+        corps = "".join(response.iter_text())
+
+    assert "Les passages trouvés" in corps or "passages trouvés" in corps
+    final = json.loads(corps.rsplit("data:", 1)[1].strip())
+    assert final["engine"]["backend"] == "extractive"
+    assert final["timing"]["truncated"] is False
+    assert final["answer"].strip()
+
+
 # ----------------------------------------------------------------- admin
 def test_admin_reserve(client: TestClient):
     connexion(client)

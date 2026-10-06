@@ -7,6 +7,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass, field
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -38,6 +39,11 @@ _HEARTBEAT = ": ping\n\n"
 #: Message affiché lorsque la génération est arrêtée faute de temps.
 TRUNCATED_NOTICE = (
     "Réponse interrompue : délai de génération dépassé. Les sources citées restent complètes."
+)
+
+#: Message affiché lorsque le délai a expiré sans produire le moindre jeton.
+TIMEOUT_FALLBACK_NOTICE = (
+    "Le modèle n'a rien produit dans le délai imparti : voici les passages trouvés."
 )
 
 
@@ -96,7 +102,18 @@ async def _sse_tokens(
         while True:
             if deadline is not None and time.monotonic() >= deadline:
                 timing.truncated = True
-                logger.warning("Génération interrompue : délai de %s dépassé", deadline)
+                logger.warning(
+                    "Génération interrompue après %d ms : délai dépassé (%d jeton(s) produit(s))",
+                    timing.elapsed_ms(),
+                    timing.tokens,
+                )
+                if pending is not None:
+                    # Laisser l'annulation se propager jusqu'au bout : sans cela le
+                    # générateur reste « en cours » et son `aclose()` lève une erreur.
+                    pending.cancel()
+                    with suppress(asyncio.CancelledError, Exception):
+                        await pending
+                    pending = None
                 return
             if pending is None:
                 pending = asyncio.ensure_future(iterator.__anext__())
@@ -219,7 +236,21 @@ async def chat(
                     # llama.cpp d'arrêter, au lieu d'attendre le ramasse-miettes.
                     await stream.aclose()
                 generated = True
-                if timing.truncated:
+                if timing.truncated and not answer_parts:
+                    # Délai épuisé sans un seul jeton : mieux vaut citer les passages
+                    # trouvés qu'afficher une réponse vide.
+                    logger.warning("Aucun jeton produit dans le délai imparti, repli extractif")
+                    generated = False
+                    timing.truncated = False  # la réponse extractive, elle, est complète
+                    engine = {"backend": "extractive", "model": None}
+                    yield _sse("notice", {"message": TIMEOUT_FALLBACK_NOTICE})
+                    async for chunk in _sse_tokens(
+                        stream_extractive_answer(question, result.hits, language=language),
+                        answer_parts,
+                        timing,
+                    ):
+                        yield chunk
+                elif timing.truncated:
                     yield _sse("notice", {"message": TRUNCATED_NOTICE})
             else:
                 async for chunk in _sse_tokens(
