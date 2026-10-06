@@ -420,13 +420,16 @@ lorsque la mémoire est abondante — réservé aux processeurs dotés d'AVX ou 
 la mémoire ne compense pas un processeur lent. À l'inverse, un processeur **dépourvu de
 toute instruction vectorielle** descend d'un cran supplémentaire, jusqu'au palier `nano`.
 
-| Profil | RAM disponible | Calcul | LLM local | Embeddings |
-|---|---|---|---|---|
-| `nano` | < 1,5 Go | sans SIMD | LFM2 350M Q4_K_M (229 Mo) | model2vec `potion-multilingual-128M` |
-| `micro` | < 1,5 Go | faible | Qwen2.5 0.5B Q4_K_M | model2vec `potion-multilingual-128M` |
-| `small` | 1,5 – 3 Go | modeste | Qwen2.5 1.5B Q4_K_M | model2vec `potion-multilingual-128M` |
-| `medium` | 3 – 7 Go | correct | Qwen2.5 3B Q4_K_M | fastembed `paraphrase-multilingual-MiniLM-L12-v2` |
-| `large` | > 7 Go | AVX2, 4 cœurs+ | Qwen2.5 7B Q4_K_M | fastembed `multilingual-e5-large` |
+| Profil | RAM disponible | Calcul | LLM local | Prompt | Embeddings |
+|---|---|---|---|---|---|
+| `nano` | < 1,5 Go | sans SIMD | LFM2 350M Q4_K_M (229 Mo) | 2 000 car. | model2vec `potion-multilingual-128M` |
+| `micro` | < 1,5 Go | faible | Qwen2.5 0.5B Q4_K_M | 3 500 car. | model2vec `potion-multilingual-128M` |
+| `small` | 1,5 – 3 Go | modeste | Qwen2.5 1.5B Q4_K_M | 5 000 car. | model2vec `potion-multilingual-128M` |
+| `medium` | 3 – 7 Go | correct | Qwen2.5 3B Q4_K_M | 7 000 car. | fastembed `paraphrase-multilingual-MiniLM-L12-v2` |
+| `large` | > 7 Go | AVX2, 4 cœurs+ | Qwen2.5 7B Q4_K_M | 10 000 car. | fastembed `multilingual-e5-large` |
+
+La colonne *Prompt* suit le profil de génération : c'est le processeur, et non la
+mémoire, qui doit relire le contexte avant de produire le premier mot.
 
 > **Le LLM ne fait pas la recherche.** Les documents sont trouvés par BM25 et les
 > embeddings ; le modèle ne fait que reformuler les passages déjà sélectionnés. Un tout
@@ -441,14 +444,17 @@ toute instruction vectorielle** descend d'un cran supplémentaire, jusqu'au pali
 | Niveau mémoire | `medium` |
 | Niveau calcul | `micro` (score ≈ 2,0) |
 | **Profil retenu** | **`nano`** — LFM2 350M Q4_K_M, 229 Mo |
+| Taille du prompt | 2000 caractères, 3 extraits |
 | Embeddings | model2vec (statiques, pas d'ONNX : trop lent sans AVX) |
 
 LFM2 350M est conçu pour l'embarqué et reste **multilingue, français compris**. Il est
 30 % plus petit que Qwen2.5 0.5B et nettement plus rapide sur un processeur sans AVX.
 
 La mémoire abondante n'accorde **aucun** cran de tolérance ici : sans AVX, un modèle
-trois fois plus gros serait trois fois plus lent sans rien apporter. Pour gagner encore
-en réactivité, deux alternatives :
+trois fois plus gros serait trois fois plus lent sans rien apporter. Pour la même raison,
+**la taille du prompt suit le processeur et non la mémoire** : le contexte doit être relu
+entièrement avant le premier mot de la réponse, et 8 Go de RAM ne font pas lire plus vite
+un Celeron. Pour gagner encore en réactivité, deux alternatives :
 
 1. **Mode extractif** (`LLM_BACKEND=none`) — réponse instantanée constituée des passages
    pertinents cités. Pas de reformulation, mais immédiat et toujours exact.
@@ -465,9 +471,9 @@ téléchargé, un modèle déjà présent est utilisé en attendant.
 
 | Levier | Effet |
 |---|---|
-| `HARDWARE_PROFILE=nano` | Modèle le plus petit (350M) : le plus rapide du catalogue. |
+| `HARDWARE_PROFILE=nano` | Modèle le plus petit (350M) **et** prompt le plus court : le réglage le plus rapide. |
 | `LLM_MAX_TOKENS=350` | Plafonne la longueur des réponses, donc l'attente maximale. |
-| `CONTEXT_MAX_CHARS=3000` | Prompt plus court à analyser avant le premier jeton. |
+| `CONTEXT_MAX_CHARS=1500` | Prompt plus court à analyser avant le premier jeton. |
 | `RETRIEVAL_TOP_K=3` | Moins d'extraits envoyés au modèle. |
 | `LLM_TIMEOUT_SECONDS=90` | Arrête la génération plus tôt et renvoie ce qui est prêt. |
 | `LLM_BACKEND=none` | Réponses extractives, instantanées. |
@@ -625,8 +631,8 @@ Choix techniques notables :
 | L'indexation se fige puis redémarre | Mémoire insuffisante (OOM killer) | Augmentez `--memory`, réduisez `INDEX_BATCH_SIZE`, passez `EMBEDDING_BACKEND=model2vec` |
 | Les réponses ignorent le sens des mots | Le moteur sémantique n'est pas encore prêt (BM25 seul) | Normal au premier démarrage : voir [Premier démarrage](#premier-démarrage). Suivez l'état dans ⚙️ → *Aperçu* → *Moteur* |
 | `État : indisponible` dans le panneau *Moteur* | Téléchargement du modèle impossible (réseau, DNS, quota Hugging Face) | L'application reste utilisable en BM25. Rétablissez l'accès sortant du conteneur, puis relancez le chargement sans redémarrer : `POST /api/admin/embeddings/reload` |
-| Réponses très lentes | LLM local trop gros pour le CPU | `HARDWARE_PROFILE=nano`, `LLM_MAX_TOKENS=350` ; sinon `LLM_BACKEND=none` (extractif) ou LLM distant |
-| « Le serveur est injoignable » après une longue attente | La génération n'aboutissait pas et bloquait la requête | Mettez l'image à jour : la génération s'arrête d'elle-même à `LLM_TIMEOUT_SECONDS` et renvoie le texte produit |
+| Réponses très lentes | Prompt trop long pour le CPU, ou LLM trop gros | Mettez l'image à jour : le prompt suit désormais le processeur. Sinon `CONTEXT_MAX_CHARS=1500`, `LLM_MAX_TOKENS=350`, ou `LLM_BACKEND=none` (extractif) |
+| « Le serveur est injoignable » après une longue attente | La génération n'aboutissait pas et bloquait la requête | Mettez l'image à jour : le prompt est raccourci sur les CPU lents, et la génération s'arrête d'elle-même à `LLM_TIMEOUT_SECONDS` |
 | « Le serveur est injoignable » au bout d'une minute, le conteneur a redémarré | La génération saturait le CPU et la sonde de santé expirait | Mettez l'image à jour (`docker pull`) : la sonde est désormais tolérante et le flux émet un battement de cœur |
 | Le chat n'affiche rien derrière un reverse proxy | Mise en tampon des réponses SSE | Désactivez le *buffering* dans la configuration du proxy |
 

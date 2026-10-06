@@ -73,6 +73,21 @@ def test_le_profil_nano_reste_coherent():
     assert hardware.tuning()["retrieval_top_k"] > 0
 
 
+def test_le_prompt_suit_le_processeur_pas_la_memoire():
+    """Un DS218+ a 8 Go mais un CPU lent : le prompt doit rester court.
+
+    Le contexte est relu par le processeur avant le premier mot de la réponse.
+    Le dimensionner sur la mémoire condamnait ces machines à plusieurs minutes
+    d'attente, puis à une coupure réseau.
+    """
+    lent = profile(cpu=2, ram=6800, flags=["sse4_2"], total=8192)
+    rapide = profile(cpu=8, ram=6800, flags=["sse4_2", "avx", "avx2"], total=8192)
+
+    assert lent.memory_tier == rapide.memory_tier  # même mémoire disponible
+    assert lent.tuning()["context_max_chars"] < rapide.tuning()["context_max_chars"]
+    assert lent.tuning()["context_max_chars"] <= 2000
+
+
 def test_la_tolerance_profite_aux_processeurs_accelerés():
     """Le même déséquilibre mémoire/CPU donne un cran de plus avec AVX."""
     hardware = profile(cpu=2, ram=6800, flags=["sse4_2", "avx"], total=8192)

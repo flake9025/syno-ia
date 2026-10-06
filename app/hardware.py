@@ -112,6 +112,7 @@ EMBEDDING_BY_PROFILE: dict[str, tuple[str, str]] = {
 
 #: Paramètres de récupération ajustés au profil.
 TUNING_BY_PROFILE: dict[str, dict[str, int]] = {
+    "nano": {"retrieval_candidates": 30, "retrieval_top_k": 3, "context_max_chars": 2000},
     "micro": {"retrieval_candidates": 40, "retrieval_top_k": 4, "context_max_chars": 3500},
     "small": {"retrieval_candidates": 60, "retrieval_top_k": 5, "context_max_chars": 5000},
     "medium": {"retrieval_candidates": 80, "retrieval_top_k": 6, "context_max_chars": 7000},
@@ -189,7 +190,14 @@ class HardwareProfile:
         return EMBEDDING_BY_PROFILE.get(self.embedding_profile, EMBEDDING_BY_PROFILE["micro"])
 
     def tuning(self) -> dict[str, int]:
-        return TUNING_BY_PROFILE.get(self.memory_tier, TUNING_BY_PROFILE["micro"])
+        """Taille du prompt : elle suit le **profil de génération**, pas la mémoire.
+
+        Un prompt doit être relu par le processeur avant le premier mot de la
+        réponse. Sur une machine à la mémoire confortable mais au CPU lent — un
+        DS218+ et ses 8 Go, par exemple — un contexte de 7000 caractères coûtait
+        plusieurs minutes d'attente avant le moindre jeton.
+        """
+        return TUNING_BY_PROFILE.get(self.profile, TUNING_BY_PROFILE["micro"])
 
     def recommended_threads(self) -> int:
         """Laisse au moins un cœur à DSM dès que la machine en possède plus de deux."""
