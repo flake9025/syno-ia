@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from app.config import Settings
 from app.hardware import (
+    LLM_BY_PROFILE,
     LOCAL_LLM_RAM_MB,
     MINIMUM_RAM_MB,
     HardwareProfile,
@@ -11,6 +15,7 @@ from app.hardware import (
     compute_tier,
     memory_tier,
 )
+from app.llm.factory import installed_model_path, local_model_path
 
 
 def profile(cpu: int, ram: int, flags: list[str], total: int | None = None) -> HardwareProfile:
@@ -38,16 +43,23 @@ def test_ds218plus_dorigine_2go():
 
 
 def test_ds218plus_etendu_8go():
-    """Même CPU mais 8 Go : la mémoire autorise un modèle plus gros, le CPU plafonne."""
+    """Même CPU mais 8 Go : la mémoire ne rachète pas l'absence d'AVX."""
     hardware = profile(cpu=2, ram=6800, flags=["sse4_2"], total=8192)
     assert hardware.memory_tier == "medium"
     assert hardware.compute_tier == "micro"
-    # Un cran de tolérance est accordé grâce à la mémoire abondante.
-    assert hardware.profile == "small"
+    # Aucun cran de tolérance sans SIMD : un modèle plus gros serait trois fois plus lent.
+    assert hardware.profile == "micro"
     assert hardware.can_host_local_llm
     # Sans AVX2, l'inférence ONNX serait trop lente : on reste sur des embeddings statiques.
     assert hardware.embedding_choice()[0] == "model2vec"
     assert any("CPU limité" in warning for warning in hardware.warnings)
+
+
+def test_la_tolerance_profite_aux_processeurs_accelerés():
+    """Le même déséquilibre mémoire/CPU donne un cran de plus avec AVX."""
+    hardware = profile(cpu=2, ram=6800, flags=["sse4_2", "avx"], total=8192)
+    assert hardware.compute_tier == "micro"
+    assert hardware.profile == "small"
 
 
 def test_nas_avec_beaucoup_de_ram_et_avx2_utilise_onnx():
@@ -93,3 +105,41 @@ def test_serialisation_complete():
         "suggested_embedding", "warnings", "meets_minimum",
     ):
         assert key in data
+
+
+# ------------------------------------------------- substitution de modèle
+def _settings_avec_modeles(tmp_path: Path, *profils: str) -> Settings:
+    settings = Settings(data_dir=tmp_path)
+    settings.models_dir.mkdir(parents=True, exist_ok=True)
+    for nom in profils:
+        (settings.models_dir / LLM_BY_PROFILE[nom].filename).touch()
+    return settings
+
+
+def test_modele_installe_substitue_celui_du_profil(tmp_path: Path):
+    """Un modèle déjà téléchargé évite de retomber en extractif après un changement de profil."""
+    settings = _settings_avec_modeles(tmp_path, "small")
+    hardware = profile(cpu=2, ram=6800, flags=["sse4_2"], total=8192)
+
+    assert hardware.profile == "micro"
+    attendu = local_model_path(settings, hardware)
+    assert attendu is not None and attendu.name == LLM_BY_PROFILE["micro"].filename
+    retenu = installed_model_path(settings, hardware)
+    assert retenu is not None and retenu.name == LLM_BY_PROFILE["small"].filename
+
+
+def test_le_modele_du_profil_prime_sur_les_autres(tmp_path: Path):
+    settings = _settings_avec_modeles(tmp_path, "micro", "small")
+    hardware = profile(cpu=2, ram=6800, flags=["sse4_2"], total=8192)
+
+    retenu = installed_model_path(settings, hardware)
+    assert retenu is not None and retenu.name == LLM_BY_PROFILE["micro"].filename
+
+
+def test_sans_modele_installe_le_chemin_attendu_est_conserve(tmp_path: Path):
+    settings = _settings_avec_modeles(tmp_path)
+    hardware = profile(cpu=2, ram=6800, flags=["sse4_2"], total=8192)
+
+    retenu = installed_model_path(settings, hardware)
+    assert retenu is not None and not retenu.exists()
+    assert retenu.name == LLM_BY_PROFILE["micro"].filename

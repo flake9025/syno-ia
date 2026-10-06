@@ -329,16 +329,18 @@ def compute_tier(score: float) -> str:
 def classify(cpu_count: int, available_ram_mb: int, flags: list[str] | None = None) -> str:
     """Profil retenu pour la **génération** : le calcul prime, la mémoire plafonne.
 
-    Un cran de tolérance est accordé au CPU lorsque la mémoire est abondante :
-    sur un DS218+ étendu à 8 Go, cela fait passer de Qwen2.5 0.5B à 1.5B, ce qui
-    reste exploitable (environ 3 à 4 jetons par seconde).
+    Un cran de tolérance est accordé lorsque la mémoire est abondante, mais
+    uniquement si le processeur dispose d'une accélération SIMD. La mémoire ne
+    compense pas un processeur lent : sur un DS218+ sans AVX, un modèle plus gros
+    ne ferait qu'allonger l'attente, chaque jeton coûtant trois fois plus cher.
     """
     flags = flags or []
     memory = memory_tier(available_ram_mb)
     compute = compute_tier(compute_score(cpu_count, flags))
     memory_index = PROFILE_ORDER.index(memory)
     compute_index = PROFILE_ORDER.index(compute)
-    tolerance = 1 if memory_index > compute_index else 0
+    accelerated = any(flag in flags for flag in ("avx", "avx2", "avx512f", "asimd", "neon"))
+    tolerance = 1 if memory_index > compute_index and accelerated else 0
     return PROFILE_ORDER[min(memory_index, compute_index + tolerance)]
 
 

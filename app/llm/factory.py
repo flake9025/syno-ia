@@ -14,7 +14,7 @@ import logging
 from pathlib import Path
 
 from ..config import Settings
-from ..hardware import HardwareProfile
+from ..hardware import LLM_BY_PROFILE, PROFILE_ORDER, HardwareProfile
 from .base import LLMBackend
 from .llamacpp import LlamaCppBackend, llama_cpp_available
 from .ollama import OllamaBackend
@@ -30,6 +30,42 @@ def local_model_path(settings: Settings, hardware: HardwareProfile) -> Path | No
         return candidate if candidate.is_absolute() else settings.models_dir / settings.llm_model
     choice = hardware.llm_choice()
     return settings.models_dir / choice.filename if choice else None
+
+
+def installed_model_path(
+    settings: Settings, hardware: HardwareProfile, *, quiet: bool = False
+) -> Path | None:
+    """Modèle réellement présent le mieux adapté, à défaut de celui attendu.
+
+    Le profil matériel peut changer d'une version à l'autre, ou après ajout de
+    mémoire. Plutôt que de retomber en mode extractif alors qu'un modèle utilisable
+    est déjà téléchargé, on retient le plus gros modèle installé qui ne dépasse pas
+    le profil ; si tous le dépassent, le plus petit d'entre eux.
+    """
+    expected = local_model_path(settings, hardware)
+    if expected is not None and expected.exists():
+        return expected
+    if settings.llm_model and settings.llm_model.endswith(".gguf"):
+        return expected  # chemin imposé par l'exploitant : pas de substitution
+
+    limit = PROFILE_ORDER.index(hardware.profile)
+    installed = [
+        (PROFILE_ORDER.index(name), settings.models_dir / choice.filename)
+        for name, choice in LLM_BY_PROFILE.items()
+        if (settings.models_dir / choice.filename).exists()
+    ]
+    if not installed:
+        return expected
+    affordable = [item for item in installed if item[0] <= limit]
+    rank, path = max(affordable) if affordable else min(installed)
+    if not quiet:
+        logger.warning(
+            "Modèle du profil « %s » absent : utilisation de %s (profil « %s ») déjà installé",
+            hardware.profile,
+            path.name,
+            PROFILE_ORDER[rank],
+        )
+    return path
 
 
 async def build_llm(settings: Settings, hardware: HardwareProfile) -> LLMBackend | None:
@@ -103,7 +139,7 @@ def _build_llamacpp(
         if not silent:
             logger.warning("llama-cpp-python absent de l'image : moteur local indisponible")
         return None
-    path = local_model_path(settings, hardware)
+    path = installed_model_path(settings, hardware, quiet=silent)
     if path is None or not path.exists():
         if not silent:
             logger.warning("Modèle GGUF absent (%s) : téléchargez-le depuis l'administration", path)
@@ -113,12 +149,12 @@ def _build_llamacpp(
             "La RAM disponible (%d Mo) est juste pour ce modèle : privilégiez un serveur distant",
             hardware.available_ram_mb,
         )
-    choice = hardware.llm_choice()
+    labels = {choice.filename: choice.label for choice in LLM_BY_PROFILE.values()}
     return LlamaCppBackend(
         path,
         context_size=settings.llm_context_size,
         threads=settings.llm_threads or hardware.recommended_threads(),
-        model_label=choice.label if choice else path.name,
+        model_label=labels.get(path.name, path.name),
     )
 
 

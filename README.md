@@ -404,7 +404,8 @@ conteneur, puis calcule **deux** niveaux indépendants :
   ce qu'il est raisonnable d'exécuter sans latence insupportable.
 
 Le profil de génération retenu est le **minimum des deux**, avec un cran de tolérance
-lorsque la mémoire est abondante.
+lorsque la mémoire est abondante — réservé aux processeurs dotés d'AVX ou de NEON, car
+la mémoire ne compense pas un processeur lent.
 
 | Profil | RAM disponible | Calcul | LLM local | Embeddings |
 |---|---|---|---|---|
@@ -420,12 +421,13 @@ lorsque la mémoire est abondante.
 | Processeur | Intel Celeron J3355, 2 cœurs, **sans AVX** |
 | Niveau mémoire | `medium` |
 | Niveau calcul | `micro` (score ≈ 2,0) |
-| **Profil retenu** | **`small`** — Qwen2.5 1.5B Q4_K_M |
+| **Profil retenu** | **`micro`** — Qwen2.5 0.5B Q4_K_M |
 | Embeddings | model2vec (statiques, pas d'ONNX : trop lent sans AVX) |
-| Débit estimé | ~3 jetons/seconde |
+| Débit estimé | ~20 jetons/seconde |
 
-Concrètement : une réponse de 150 mots demande **environ une minute**. C'est utilisable
-pour de la recherche documentaire, pas pour de la conversation. Deux alternatives :
+La mémoire abondante n'accorde **aucun** cran de tolérance ici : sans AVX, un modèle
+trois fois plus gros serait trois fois plus lent sans rien apporter. Pour gagner encore
+en réactivité, deux alternatives :
 
 1. **Mode extractif** (`LLM_BACKEND=none`) — réponse instantanée constituée des passages
    pertinents cités. Pas de reformulation, mais immédiat et toujours exact.
@@ -433,7 +435,20 @@ pour de la recherche documentaire, pas pour de la conversation. Deux alternative
    compatible OpenAI. L'indexation et le filtrage ACL restent sur le NAS ; seuls les
    extraits déjà autorisés sont transmis.
 
-Le profil peut être forcé : `HARDWARE_PROFILE=micro|small|medium|large`.
+Le profil peut être forcé : `HARDWARE_PROFILE=micro|small|medium|large`. Changer de
+profil ne touche qu'au LLM : le modèle d'embeddings suit la mémoire, l'index vectoriel
+déjà construit reste donc valide. Si le modèle du nouveau profil n'est pas encore
+téléchargé, un modèle déjà présent est utilisé en attendant.
+
+#### Accélérer les réponses
+
+| Levier | Effet |
+|---|---|
+| `HARDWARE_PROFILE=micro` | Modèle le plus petit (0.5B) : environ 3× plus rapide que 1.5B. |
+| `LLM_MAX_TOKENS=350` | Plafonne la longueur des réponses, donc l'attente maximale. |
+| `CONTEXT_MAX_CHARS=3000` | Prompt plus court à analyser avant le premier jeton. |
+| `RETRIEVAL_TOP_K=3` | Moins d'extraits envoyés au modèle. |
+| `LLM_BACKEND=none` | Réponses extractives, instantanées. |
 
 ---
 
@@ -569,7 +584,8 @@ Choix techniques notables :
 | L'indexation se fige puis redémarre | Mémoire insuffisante (OOM killer) | Augmentez `--memory`, réduisez `INDEX_BATCH_SIZE`, passez `EMBEDDING_BACKEND=model2vec` |
 | Les réponses ignorent le sens des mots | Le moteur sémantique n'est pas encore prêt (BM25 seul) | Normal au premier démarrage : voir [Premier démarrage](#premier-démarrage). Suivez l'état dans ⚙️ → *Aperçu* → *Moteur* |
 | `État : indisponible` dans le panneau *Moteur* | Téléchargement du modèle impossible (réseau, DNS, quota Hugging Face) | L'application reste utilisable en BM25. Rétablissez l'accès sortant du conteneur, puis relancez le chargement sans redémarrer : `POST /api/admin/embeddings/reload` |
-| Réponses très lentes | LLM local trop gros pour le CPU | `LLM_BACKEND=none` (extractif) ou LLM distant |
+| Réponses très lentes | LLM local trop gros pour le CPU | `HARDWARE_PROFILE=micro`, `LLM_MAX_TOKENS=350` ; sinon `LLM_BACKEND=none` (extractif) ou LLM distant |
+| « Le serveur est injoignable » au bout d'une minute, le conteneur a redémarré | La génération saturait le CPU et la sonde de santé expirait | Mettez l'image à jour (`docker pull`) : la sonde est désormais tolérante et le flux émet un battement de cœur |
 | Le chat n'affiche rien derrière un reverse proxy | Mise en tampon des réponses SSE | Désactivez le *buffering* dans la configuration du proxy |
 
 Journaux : `docker logs -f syno-ia`. État du service : `GET /api/health` (public, sans
