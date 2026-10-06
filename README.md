@@ -274,8 +274,8 @@ sudo docker run -d \
 ```
 
 Puis, depuis le panneau d'administration, onglet **Modèles** : *Télécharger le modèle
-recommandé*. Le fichier GGUF (~1 Go pour le profil `small`) est stocké dans
-`/app/data/models` et survit aux mises à jour.
+recommandé*. Le fichier GGUF (229 Mo pour le profil `nano`, ~1 Go pour `small`) est stocké
+dans `/app/data/models` et survit aux mises à jour.
 
 Tant que le modèle n'est pas téléchargé, `LLM_BACKEND=auto` laisse l'application en mode
 extractif ; elle bascule toute seule sur `llamacpp` dès que le fichier est présent.
@@ -417,14 +417,21 @@ conteneur, puis calcule **deux** niveaux indépendants :
 
 Le profil de génération retenu est le **minimum des deux**, avec un cran de tolérance
 lorsque la mémoire est abondante — réservé aux processeurs dotés d'AVX ou de NEON, car
-la mémoire ne compense pas un processeur lent.
+la mémoire ne compense pas un processeur lent. À l'inverse, un processeur **dépourvu de
+toute instruction vectorielle** descend d'un cran supplémentaire, jusqu'au palier `nano`.
 
 | Profil | RAM disponible | Calcul | LLM local | Embeddings |
 |---|---|---|---|---|
+| `nano` | < 1,5 Go | sans SIMD | LFM2 350M Q4_K_M (229 Mo) | model2vec `potion-multilingual-128M` |
 | `micro` | < 1,5 Go | faible | Qwen2.5 0.5B Q4_K_M | model2vec `potion-multilingual-128M` |
 | `small` | 1,5 – 3 Go | modeste | Qwen2.5 1.5B Q4_K_M | model2vec `potion-multilingual-128M` |
 | `medium` | 3 – 7 Go | correct | Qwen2.5 3B Q4_K_M | fastembed `paraphrase-multilingual-MiniLM-L12-v2` |
 | `large` | > 7 Go | AVX2, 4 cœurs+ | Qwen2.5 7B Q4_K_M | fastembed `multilingual-e5-large` |
+
+> **Le LLM ne fait pas la recherche.** Les documents sont trouvés par BM25 et les
+> embeddings ; le modèle ne fait que reformuler les passages déjà sélectionnés. Un tout
+> petit modèle suffit donc parfaitement, et le [mode extractif](#variables-denvironnement)
+> (`LLM_BACKEND=none`) répond même sans aucun LLM.
 
 ### Cas concret : DS218+ avec 8 Go
 
@@ -433,9 +440,11 @@ la mémoire ne compense pas un processeur lent.
 | Processeur | Intel Celeron J3355, 2 cœurs, **sans AVX** |
 | Niveau mémoire | `medium` |
 | Niveau calcul | `micro` (score ≈ 2,0) |
-| **Profil retenu** | **`micro`** — Qwen2.5 0.5B Q4_K_M |
+| **Profil retenu** | **`nano`** — LFM2 350M Q4_K_M, 229 Mo |
 | Embeddings | model2vec (statiques, pas d'ONNX : trop lent sans AVX) |
-| Débit estimé | ~20 jetons/seconde |
+
+LFM2 350M est conçu pour l'embarqué et reste **multilingue, français compris**. Il est
+30 % plus petit que Qwen2.5 0.5B et nettement plus rapide sur un processeur sans AVX.
 
 La mémoire abondante n'accorde **aucun** cran de tolérance ici : sans AVX, un modèle
 trois fois plus gros serait trois fois plus lent sans rien apporter. Pour gagner encore
@@ -447,7 +456,7 @@ en réactivité, deux alternatives :
    compatible OpenAI. L'indexation et le filtrage ACL restent sur le NAS ; seuls les
    extraits déjà autorisés sont transmis.
 
-Le profil peut être forcé : `HARDWARE_PROFILE=micro|small|medium|large`. Changer de
+Le profil peut être forcé : `HARDWARE_PROFILE=nano|micro|small|medium|large`. Changer de
 profil ne touche qu'au LLM : le modèle d'embeddings suit la mémoire, l'index vectoriel
 déjà construit reste donc valide. Si le modèle du nouveau profil n'est pas encore
 téléchargé, un modèle déjà présent est utilisé en attendant.
@@ -456,14 +465,20 @@ téléchargé, un modèle déjà présent est utilisé en attendant.
 
 | Levier | Effet |
 |---|---|
-| `HARDWARE_PROFILE=micro` | Modèle le plus petit (0.5B) : environ 3× plus rapide que 1.5B. |
+| `HARDWARE_PROFILE=nano` | Modèle le plus petit (350M) : le plus rapide du catalogue. |
 | `LLM_MAX_TOKENS=350` | Plafonne la longueur des réponses, donc l'attente maximale. |
 | `CONTEXT_MAX_CHARS=3000` | Prompt plus court à analyser avant le premier jeton. |
 | `RETRIEVAL_TOP_K=3` | Moins d'extraits envoyés au modèle. |
+| `LLM_TIMEOUT_SECONDS=90` | Arrête la génération plus tôt et renvoie ce qui est prêt. |
 | `LLM_BACKEND=none` | Réponses extractives, instantanées. |
 
 Chaque réponse affiche le moteur réellement utilisé et le temps passé (total, premier jeton,
 jetons/seconde) : de quoi mesurer l'effet de ces réglages sans quitter l'interface.
+
+Au-delà de `LLM_TIMEOUT_SECONDS` (120 s par défaut), la génération est **arrêtée net** et
+le texte déjà produit est conservé, accompagné d'un avertissement. Le NAS ne reste donc
+jamais bloqué sur une réponse interminable, et llama.cpp cesse aussitôt de consommer les
+cœurs. `0` lève la limite.
 
 #### Faire de la place
 
@@ -495,9 +510,10 @@ Fichier complet et commenté : [`.env.example`](.env.example). L'essentiel :
 | `EMBEDDING_ASYNC_LOAD` | `true` | Charge le modèle en arrière-plan (voir [Premier démarrage](#premier-démarrage)). `false` rend le démarrage bloquant. |
 | `EMBEDDING_BACKFILL_BATCH` | `64` | Fragments vectorisés par lot lors du rattrapage. |
 | `LLM_BACKEND` | `auto` | `auto`, `llamacpp`, `ollama`, `openai`, `none`. |
+| `LLM_TIMEOUT_SECONDS` | `120` | Délai maximal d'une génération ; au-delà, la réponse est tronquée proprement (`0` = sans limite). |
 | `OLLAMA_URL` | `http://172.17.0.1:11434` | Ollama local ou distant. |
 | `OPENAI_API_KEY` | *(vide)* | Service compatible OpenAI. |
-| `HARDWARE_PROFILE` | `auto` | Forçage du profil (`micro`…`large`). |
+| `HARDWARE_PROFILE` | `auto` | Forçage du profil (`nano`…`large`). |
 
 En mode `auto`, le LLM est choisi dans cet ordre : service compatible OpenAI (si une clé
 est présente) → Ollama (s'il répond) → `llama.cpp` local (si un modèle est présent) →
@@ -607,7 +623,8 @@ Choix techniques notables :
 | L'indexation se fige puis redémarre | Mémoire insuffisante (OOM killer) | Augmentez `--memory`, réduisez `INDEX_BATCH_SIZE`, passez `EMBEDDING_BACKEND=model2vec` |
 | Les réponses ignorent le sens des mots | Le moteur sémantique n'est pas encore prêt (BM25 seul) | Normal au premier démarrage : voir [Premier démarrage](#premier-démarrage). Suivez l'état dans ⚙️ → *Aperçu* → *Moteur* |
 | `État : indisponible` dans le panneau *Moteur* | Téléchargement du modèle impossible (réseau, DNS, quota Hugging Face) | L'application reste utilisable en BM25. Rétablissez l'accès sortant du conteneur, puis relancez le chargement sans redémarrer : `POST /api/admin/embeddings/reload` |
-| Réponses très lentes | LLM local trop gros pour le CPU | `HARDWARE_PROFILE=micro`, `LLM_MAX_TOKENS=350` ; sinon `LLM_BACKEND=none` (extractif) ou LLM distant |
+| Réponses très lentes | LLM local trop gros pour le CPU | `HARDWARE_PROFILE=nano`, `LLM_MAX_TOKENS=350` ; sinon `LLM_BACKEND=none` (extractif) ou LLM distant |
+| « Le serveur est injoignable » après une longue attente | La génération n'aboutissait pas et bloquait la requête | Mettez l'image à jour : la génération s'arrête d'elle-même à `LLM_TIMEOUT_SECONDS` et renvoie le texte produit |
 | « Le serveur est injoignable » au bout d'une minute, le conteneur a redémarré | La génération saturait le CPU et la sonde de santé expirait | Mettez l'image à jour (`docker pull`) : la sonde est désormais tolérante et le flux émet un battement de cœur |
 | Le chat n'affiche rien derrière un reverse proxy | Mise en tampon des réponses SSE | Désactivez le *buffering* dans la configuration du proxy |
 

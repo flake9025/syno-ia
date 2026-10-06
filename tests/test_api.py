@@ -342,6 +342,29 @@ async def test_erreur_de_generation_remontee(monkeypatch: pytest.MonkeyPatch):
     assert reponse == ["debut"]
 
 
+async def test_generation_interrompue_au_dela_du_delai():
+    """Passé le délai, on garde ce qui a été produit plutôt que d'attendre indéfiniment."""
+    import time as _time
+
+    async def generation_interminable() -> AsyncIterator[str]:
+        yield "premier"
+        while True:
+            await asyncio.sleep(0.02)
+            yield "encore"
+
+    reponse: list[str] = []
+    chrono = routes_chat._Timing()
+    flux = routes_chat._sse_tokens(
+        generation_interminable(), reponse, chrono, _time.monotonic() + 0.2
+    )
+    recus = [m async for m in flux]
+
+    assert chrono.truncated is True
+    assert chrono.snapshot()["truncated"] is True
+    assert reponse[0] == "premier"
+    assert len(recus) == len(reponse)
+
+
 def test_chat_annonce_le_moteur_et_les_durees(client: TestClient):
     """L'utilisateur doit pouvoir vérifier quel moteur a répondu et en combien de temps."""
     connexion(client)

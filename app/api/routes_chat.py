@@ -35,6 +35,11 @@ HEARTBEAT_SECONDS = 15.0
 #: suffit à maintenir la connexion ouverte et à prouver que le serveur travaille.
 _HEARTBEAT = ": ping\n\n"
 
+#: Message affiché lorsque la génération est arrêtée faute de temps.
+TRUNCATED_NOTICE = (
+    "Réponse interrompue : délai de génération dépassé. Les sources citées restent complètes."
+)
+
 
 @dataclass
 class _Timing:
@@ -44,6 +49,7 @@ class _Timing:
     retrieval_ms: int = 0
     first_token_ms: int = 0
     tokens: int = 0
+    truncated: bool = False
 
     def elapsed_ms(self) -> int:
         return int((time.monotonic() - self.started) * 1000)
@@ -54,6 +60,7 @@ class _Timing:
             "first_token_ms": self.first_token_ms,
             "total_ms": self.elapsed_ms(),
             "tokens": self.tokens,
+            "truncated": self.truncated,
         }
         generation_ms = data["total_ms"] - self.first_token_ms
         if self.tokens > 1 and generation_ms > 0:
@@ -72,16 +79,31 @@ def _sse(event: str, data: dict) -> str:
 
 
 async def _sse_tokens(
-    tokens: AsyncIterator[str], answer_parts: list[str], timing: _Timing
+    tokens: AsyncIterator[str],
+    answer_parts: list[str],
+    timing: _Timing,
+    deadline: float | None = None,
 ) -> AsyncIterator[str]:
-    """Relaie les jetons en SSE, en intercalant un battement de cœur pendant les silences."""
+    """Relaie les jetons en SSE, en intercalant un battement de cœur pendant les silences.
+
+    Passé `deadline`, la génération est abandonnée et ce qui a déjà été produit est
+    conservé : sur un NAS modeste, une réponse tronquée vaut mieux qu'une requête
+    qui n'aboutit jamais.
+    """
     iterator = tokens.__aiter__()
     pending: asyncio.Future | None = None
     try:
         while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                timing.truncated = True
+                logger.warning("Génération interrompue : délai de %s dépassé", deadline)
+                return
             if pending is None:
                 pending = asyncio.ensure_future(iterator.__anext__())
-            done, _ = await asyncio.wait({pending}, timeout=HEARTBEAT_SECONDS)
+            wait_for = HEARTBEAT_SECONDS
+            if deadline is not None:
+                wait_for = max(0.1, min(wait_for, deadline - time.monotonic()))
+            done, _ = await asyncio.wait({pending}, timeout=wait_for)
             if not done:
                 yield _HEARTBEAT
                 continue
@@ -177,6 +199,8 @@ async def chat(
             return
 
         generated = False
+        budget = context.settings.llm_timeout_seconds
+        deadline = time.monotonic() + budget if budget > 0 else None
         try:
             if context.llm is not None and context.llm.available:
                 messages = build_messages(
@@ -187,9 +211,16 @@ async def chat(
                     temperature=context.settings.llm_temperature,
                     max_tokens=context.settings.llm_max_tokens,
                 )
-                async for chunk in _sse_tokens(stream, answer_parts, timing):
-                    yield chunk
+                try:
+                    async for chunk in _sse_tokens(stream, answer_parts, timing, deadline):
+                        yield chunk
+                finally:
+                    # Referme explicitement le moteur : son `finally` signale au fil
+                    # llama.cpp d'arrêter, au lieu d'attendre le ramasse-miettes.
+                    await stream.aclose()
                 generated = True
+                if timing.truncated:
+                    yield _sse("notice", {"message": TRUNCATED_NOTICE})
             else:
                 async for chunk in _sse_tokens(
                     stream_extractive_answer(question, result.hits, language=language),

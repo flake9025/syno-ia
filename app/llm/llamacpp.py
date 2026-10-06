@@ -92,6 +92,7 @@ class LlamaCppBackend(LLMBackend):
     ) -> AsyncIterator[str]:
         loop = asyncio.get_running_loop()
         output: queue.Queue = queue.Queue(maxsize=64)
+        cancelled = threading.Event()
 
         def _worker() -> None:
             try:
@@ -103,6 +104,8 @@ class LlamaCppBackend(LLMBackend):
                     stream=True,
                 )
                 for part in stream:
+                    if cancelled.is_set():
+                        break
                     delta = (part.get("choices") or [{}])[0].get("delta") or {}
                     token = delta.get("content")
                     if token:
@@ -123,7 +126,16 @@ class LlamaCppBackend(LLMBackend):
                     raise item
                 yield item
         finally:
-            thread.join(timeout=1.0)
+            # Abandon (client parti, délai dépassé) : sans ce drapeau, llama.cpp
+            # continuerait à produire des jetons que plus personne ne lit, en
+            # monopolisant les cœurs du NAS jusqu'à `max_tokens`.
+            cancelled.set()
+            while True:  # débloque un `put` resté en attente sur une file pleine
+                try:
+                    output.get_nowait()
+                except queue.Empty:
+                    break
+            thread.join(timeout=2.0)
 
     async def health(self) -> bool:
         return self.available

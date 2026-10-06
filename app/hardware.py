@@ -36,6 +36,11 @@ _CPUINFO = Path("/proc/cpuinfo")
 
 PROFILE_ORDER = ["micro", "small", "medium", "large"]
 
+#: Catalogue de modèles, du plus léger au plus lourd. « nano » n'est jamais le
+#: résultat d'une mesure de mémoire ou de calcul : c'est le palier de repli pour
+#: les processeurs dépourvus d'accélération vectorielle, où même 0.5B rame.
+MODEL_ORDER = ["nano", *PROFILE_ORDER]
+
 #: Socle minimal pour faire tourner syno-ia (en deçà, l'application démarre mais
 #: alerte : l'indexation risque d'être interrompue par le tueur de mémoire).
 MINIMUM_RAM_MB = 900
@@ -63,6 +68,12 @@ class ModelChoice:
 
 #: Modèles LLM par profil, du plus léger au plus lourd.
 LLM_BY_PROFILE: dict[str, ModelChoice] = {
+    "nano": ModelChoice(
+        repo_id="LiquidAI/LFM2-350M-GGUF",
+        filename="LFM2-350M-Q4_K_M.gguf",
+        label="LFM2 350M (Q4_K_M)",
+        approx_ram_mb=330,
+    ),
     "micro": ModelChoice(
         repo_id="Qwen/Qwen2.5-0.5B-Instruct-GGUF",
         filename="qwen2.5-0.5b-instruct-q4_k_m.gguf",
@@ -189,7 +200,9 @@ class HardwareProfile:
         choice = self.llm_choice()
         if choice is None:
             return 0.0
-        billions = {"micro": 0.5, "small": 1.5, "medium": 3.0, "large": 7.0}[self.profile]
+        billions = {"nano": 0.35, "micro": 0.5, "small": 1.5, "medium": 3.0, "large": 7.0}[
+            self.profile
+        ]
         simd = 2.2 if self.has_avx2 else (1.4 if self.has_avx else 1.0)
         return round(max(0.2, (5.5 * self.cpu_count * simd) / billions), 1)
 
@@ -333,6 +346,9 @@ def classify(cpu_count: int, available_ram_mb: int, flags: list[str] | None = No
     uniquement si le processeur dispose d'une accélération SIMD. La mémoire ne
     compense pas un processeur lent : sur un DS218+ sans AVX, un modèle plus gros
     ne ferait qu'allonger l'attente, chaque jeton coûtant trois fois plus cher.
+
+    Sans aucune accélération vectorielle, même 0.5B reste pénible : on descend
+    alors au palier « nano », dont le modèle tient en 350 millions de paramètres.
     """
     flags = flags or []
     memory = memory_tier(available_ram_mb)
@@ -341,7 +357,8 @@ def classify(cpu_count: int, available_ram_mb: int, flags: list[str] | None = No
     compute_index = PROFILE_ORDER.index(compute)
     accelerated = any(flag in flags for flag in ("avx", "avx2", "avx512f", "asimd", "neon"))
     tolerance = 1 if memory_index > compute_index and accelerated else 0
-    return PROFILE_ORDER[min(memory_index, compute_index + tolerance)]
+    profile = PROFILE_ORDER[min(memory_index, compute_index + tolerance)]
+    return "nano" if profile == "micro" and not accelerated else profile
 
 
 def detect_hardware(forced_profile: str = "auto") -> HardwareProfile:
@@ -355,7 +372,7 @@ def detect_hardware(forced_profile: str = "auto") -> HardwareProfile:
     profile = classify(cpu_count, available_mb, flags)
     detected_from = "auto"
     if forced_profile and forced_profile != "auto":
-        if forced_profile in PROFILE_ORDER:
+        if forced_profile in MODEL_ORDER:
             profile, detected_from = forced_profile, "forced"
         else:
             logger.warning(

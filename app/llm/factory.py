@@ -14,7 +14,7 @@ import logging
 from pathlib import Path
 
 from ..config import Settings
-from ..hardware import LLM_BY_PROFILE, PROFILE_ORDER, HardwareProfile
+from ..hardware import LLM_BY_PROFILE, MODEL_ORDER, HardwareProfile
 from .base import LLMBackend
 from .llamacpp import LlamaCppBackend, llama_cpp_available
 from .ollama import OllamaBackend
@@ -48,9 +48,9 @@ def installed_model_path(
     if settings.llm_model and settings.llm_model.endswith(".gguf"):
         return expected  # chemin imposé par l'exploitant : pas de substitution
 
-    limit = PROFILE_ORDER.index(hardware.profile)
+    limit = MODEL_ORDER.index(hardware.profile)
     installed = [
-        (PROFILE_ORDER.index(name), settings.models_dir / choice.filename)
+        (MODEL_ORDER.index(name), settings.models_dir / choice.filename)
         for name, choice in LLM_BY_PROFILE.items()
         if (settings.models_dir / choice.filename).exists()
     ]
@@ -63,7 +63,7 @@ def installed_model_path(
             "Modèle du profil « %s » absent : utilisation de %s (profil « %s ») déjà installé",
             hardware.profile,
             path.name,
-            PROFILE_ORDER[rank],
+            MODEL_ORDER[rank],
         )
     return path
 

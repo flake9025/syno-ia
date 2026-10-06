@@ -38,7 +38,8 @@ def test_ds218plus_dorigine_2go():
     hardware = profile(cpu=2, ram=1400, flags=["sse4_2"], total=2048)
     assert hardware.memory_tier == "micro"
     assert hardware.compute_tier == "micro"
-    assert hardware.profile == "micro"
+    # Sans la moindre accélération vectorielle, on descend sous « micro ».
+    assert hardware.profile == "nano"
     assert hardware.embedding_choice()[0] == "model2vec"
 
 
@@ -48,11 +49,28 @@ def test_ds218plus_etendu_8go():
     assert hardware.memory_tier == "medium"
     assert hardware.compute_tier == "micro"
     # Aucun cran de tolérance sans SIMD : un modèle plus gros serait trois fois plus lent.
-    assert hardware.profile == "micro"
+    assert hardware.profile == "nano"
     assert hardware.can_host_local_llm
     # Sans AVX2, l'inférence ONNX serait trop lente : on reste sur des embeddings statiques.
     assert hardware.embedding_choice()[0] == "model2vec"
     assert any("CPU limité" in warning for warning in hardware.warnings)
+
+
+def test_nano_reserve_aux_processeurs_sans_simd():
+    """Le moindre jeu d'instructions vectorielles suffit à mériter « micro »."""
+    assert classify(2, 1400, ["sse4_2", "avx"]) == "micro"
+    assert classify(2, 1400, ["asimd"]) == "micro"
+    assert classify(2, 1400, []) == "nano"
+
+
+def test_le_profil_nano_reste_coherent():
+    hardware = profile(cpu=2, ram=6800, flags=["sse4_2"], total=8192)
+    choice = hardware.llm_choice()
+    assert choice is not None and choice.approx_ram_mb < LLM_BY_PROFILE["micro"].approx_ram_mb
+    # Les embeddings suivent la mémoire, pas le profil : l'index reste valide.
+    assert hardware.embedding_profile in ("micro", "small", "medium", "large")
+    assert hardware.estimated_tokens_per_second() > 0
+    assert hardware.tuning()["retrieval_top_k"] > 0
 
 
 def test_la_tolerance_profite_aux_processeurs_accelerés():
@@ -121,19 +139,19 @@ def test_modele_installe_substitue_celui_du_profil(tmp_path: Path):
     settings = _settings_avec_modeles(tmp_path, "small")
     hardware = profile(cpu=2, ram=6800, flags=["sse4_2"], total=8192)
 
-    assert hardware.profile == "micro"
+    assert hardware.profile == "nano"
     attendu = local_model_path(settings, hardware)
-    assert attendu is not None and attendu.name == LLM_BY_PROFILE["micro"].filename
+    assert attendu is not None and attendu.name == LLM_BY_PROFILE["nano"].filename
     retenu = installed_model_path(settings, hardware)
     assert retenu is not None and retenu.name == LLM_BY_PROFILE["small"].filename
 
 
 def test_le_modele_du_profil_prime_sur_les_autres(tmp_path: Path):
-    settings = _settings_avec_modeles(tmp_path, "micro", "small")
+    settings = _settings_avec_modeles(tmp_path, "nano", "small")
     hardware = profile(cpu=2, ram=6800, flags=["sse4_2"], total=8192)
 
     retenu = installed_model_path(settings, hardware)
-    assert retenu is not None and retenu.name == LLM_BY_PROFILE["micro"].filename
+    assert retenu is not None and retenu.name == LLM_BY_PROFILE["nano"].filename
 
 
 def test_sans_modele_installe_le_chemin_attendu_est_conserve(tmp_path: Path):
@@ -142,4 +160,4 @@ def test_sans_modele_installe_le_chemin_attendu_est_conserve(tmp_path: Path):
 
     retenu = installed_model_path(settings, hardware)
     assert retenu is not None and not retenu.exists()
-    assert retenu.name == LLM_BY_PROFILE["micro"].filename
+    assert retenu.name == LLM_BY_PROFILE["nano"].filename

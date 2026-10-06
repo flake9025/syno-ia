@@ -371,6 +371,7 @@ function renderStats(node, engine, timing) {
   if (timing.tokens_per_second) {
     parts.push(t('app.statSpeed', { n: timing.tokens_per_second }));
   }
+  if (timing.truncated) parts.push(t('app.statTruncated'));
   node.textContent = parts.join(' · ');
   node.classList.add('final');
 }

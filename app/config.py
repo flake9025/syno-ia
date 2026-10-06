@@ -132,12 +132,16 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 700
     llm_context_size: int = 4096
     llm_threads: int = 0
+    #: Délai maximal d'une génération, en secondes. Au-delà, la réponse est
+    #: arrêtée net et ce qui a déjà été produit est renvoyé : mieux vaut un texte
+    #: tronqué qu'une requête qui n'aboutit jamais. 0 désactive la limite.
+    llm_timeout_seconds: int = 120
 
     ollama_url: str = "http://172.17.0.1:11434"
     openai_base_url: str = "https://api.openai.com/v1"
     openai_api_key: str = ""
 
-    #: Forçage manuel du profil matériel (« micro », « small », « medium », « large »).
+    #: Forçage manuel du profil matériel (« nano » à « large »).
     hardware_profile: str = "auto"
 
     # ---------------------------------------------------------------- setters
