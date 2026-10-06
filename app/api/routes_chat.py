@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
@@ -34,6 +36,31 @@ HEARTBEAT_SECONDS = 15.0
 _HEARTBEAT = ": ping\n\n"
 
 
+@dataclass
+class _Timing:
+    """Chronomètre d'une réponse, pour que l'utilisateur sache où part le temps."""
+
+    started: float = field(default_factory=time.monotonic)
+    retrieval_ms: int = 0
+    first_token_ms: int = 0
+    tokens: int = 0
+
+    def elapsed_ms(self) -> int:
+        return int((time.monotonic() - self.started) * 1000)
+
+    def snapshot(self) -> dict:
+        data = {
+            "retrieval_ms": self.retrieval_ms,
+            "first_token_ms": self.first_token_ms,
+            "total_ms": self.elapsed_ms(),
+            "tokens": self.tokens,
+        }
+        generation_ms = data["total_ms"] - self.first_token_ms
+        if self.tokens > 1 and generation_ms > 0:
+            data["tokens_per_second"] = round(self.tokens / (generation_ms / 1000), 1)
+        return data
+
+
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=MAX_QUESTION_LENGTH)
     history: list[dict] = Field(default_factory=list)
@@ -44,7 +71,9 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-async def _sse_tokens(tokens: AsyncIterator[str], answer_parts: list[str]) -> AsyncIterator[str]:
+async def _sse_tokens(
+    tokens: AsyncIterator[str], answer_parts: list[str], timing: _Timing
+) -> AsyncIterator[str]:
     """Relaie les jetons en SSE, en intercalant un battement de cœur pendant les silences."""
     iterator = tokens.__aiter__()
     pending: asyncio.Future | None = None
@@ -61,6 +90,9 @@ async def _sse_tokens(tokens: AsyncIterator[str], answer_parts: list[str]) -> As
                 token = finished.result()
             except StopAsyncIteration:
                 return
+            if not timing.tokens:
+                timing.first_token_ms = timing.elapsed_ms()
+            timing.tokens += 1
             answer_parts.append(token)
             yield _sse("token", {"text": token})
     finally:
@@ -80,8 +112,21 @@ async def chat(
     question = payload.question.strip()
     language = session.language or context.settings.default_language
 
+    def _engine() -> dict:
+        """Identité du moteur qui va répondre, pour que l'utilisateur puisse la vérifier."""
+        if context.llm is not None and context.llm.available:
+            info = context.llm.describe()
+            return {
+                "backend": info.get("backend", "?"),
+                "model": info.get("model") or "?",
+                "threads": info.get("threads"),
+                "context_size": info.get("context_size"),
+            }
+        return {"backend": "extractive", "model": None}
+
     async def event_stream() -> AsyncIterator[str]:
         answer_parts: list[str] = []
+        timing = _Timing()
         retrieval = asyncio.ensure_future(
             context.pipeline.retrieve(session.dsm, question, top_k=payload.top_k)
         )
@@ -102,6 +147,8 @@ async def chat(
         finally:
             retrieval.cancel()
 
+        timing.retrieval_ms = timing.elapsed_ms()
+        engine = _engine()
         yield _sse(
             "sources",
             {
@@ -110,13 +157,23 @@ async def chat(
                 "filtered_out": result.filtered_out,
                 "lexical_only": result.lexical_only,
                 "embeddings_pending": context.embeddings_pending,
+                "engine": engine,
+                "retrieval_ms": timing.retrieval_ms,
             },
         )
 
         if result.is_empty:
             message = no_context_message(language)
             yield _sse("token", {"text": message})
-            yield _sse("done", {"answer": message, "generated": False})
+            yield _sse(
+                "done",
+                {
+                    "answer": message,
+                    "generated": False,
+                    "engine": {"backend": "none", "model": None},
+                    "timing": timing.snapshot(),
+                },
+            )
             return
 
         generated = False
@@ -130,21 +187,25 @@ async def chat(
                     temperature=context.settings.llm_temperature,
                     max_tokens=context.settings.llm_max_tokens,
                 )
-                async for chunk in _sse_tokens(stream, answer_parts):
+                async for chunk in _sse_tokens(stream, answer_parts, timing):
                     yield chunk
                 generated = True
             else:
                 async for chunk in _sse_tokens(
                     stream_extractive_answer(question, result.hits, language=language),
                     answer_parts,
+                    timing,
                 ):
                     yield chunk
         except LLMUnavailable as exc:
             logger.warning("Moteur de génération indisponible, repli extractif : %s", exc)
             answer_parts.clear()
+            engine = {"backend": "extractive", "model": None}
             yield _sse("notice", {"message": f"Génération indisponible ({exc}). Mode extractif."})
             async for chunk in _sse_tokens(
-                stream_extractive_answer(question, result.hits, language=language), answer_parts
+                stream_extractive_answer(question, result.hits, language=language),
+                answer_parts,
+                timing,
             ):
                 yield chunk
         except asyncio.CancelledError:  # client déconnecté
@@ -159,7 +220,21 @@ async def chat(
             {"role": "user", "content": question},
             {"role": "assistant", "content": answer},
         ])[-8:]
-        yield _sse("done", {"answer": answer, "generated": generated})
+        if not generated:
+            engine = {"backend": "extractive", "model": None}
+        stats = timing.snapshot()
+        logger.info(
+            "Réponse en %d ms (recherche %d ms, 1er jeton %d ms, %d jetons, %s)",
+            stats["total_ms"],
+            stats["retrieval_ms"],
+            stats["first_token_ms"],
+            stats["tokens"],
+            engine.get("model") or engine.get("backend"),
+        )
+        yield _sse(
+            "done",
+            {"answer": answer, "generated": generated, "engine": engine, "timing": stats},
+        )
 
     return StreamingResponse(
         event_stream(),

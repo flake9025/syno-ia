@@ -150,10 +150,13 @@ class DSMClient:
         verify_ssl: bool = False,
         timeout: float = 20.0,
         session_name: str = "FileStation",
+        device_name: str = "syno-ia",
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.session_name = session_name
+        #: Libellé affiché dans DSM → Compte → Appareils approuvés.
+        self.device_name = device_name
         self._external_client = client is not None
         self._client = client or httpx.AsyncClient(
             base_url=self.base_url,
@@ -259,9 +262,23 @@ class DSMClient:
 
     # --------------------------------------------------------- authentification
     async def login(
-        self, account: str, password: str, otp_code: str | None = None
+        self,
+        account: str,
+        password: str,
+        otp_code: str | None = None,
+        *,
+        device_id: str | None = None,
+        trust_device: bool = False,
     ) -> DSMSession:
-        """Authentifie un utilisateur DSM et retourne sa session."""
+        """Authentifie un utilisateur DSM et retourne sa session.
+
+        `device_id` rejoue un appareil déjà approuvé : DSM accepte alors la connexion
+        sans réclamer de second facteur. `trust_device` demande l'émission d'un tel
+        jeton, ce que DSM ne fait qu'au moment où un code OTP valide lui est présenté
+        — on ne peut donc jamais obtenir la confiance sans avoir prouvé le second
+        facteur au moins une fois.
+        """
+        approving = bool(trust_device and otp_code)
         data = await self.request(
             "SYNO.API.Auth",
             "login",
@@ -272,6 +289,9 @@ class DSMClient:
             session=self.session_name,
             format="sid",
             otp_code=otp_code or None,
+            device_id=device_id or None,
+            enable_device_token="yes" if approving else None,
+            device_name=self.device_name if approving else None,
         )
         sid = data.get("sid")
         if not sid:

@@ -84,6 +84,11 @@ function showLogin() {
   $('#login-view').classList.remove('hidden');
   $('#app-view').classList.add('hidden');
   $('#password').value = '';
+  // Un code à usage unique ne se rejoue pas : on repart du formulaire simple,
+  // le refus DSM révélera à nouveau le champ si le second facteur est requis.
+  $('#otp').value = '';
+  $('#otp-field').classList.add('hidden');
+  $('#trust-field').classList.add('hidden');
 }
 
 function showApp() {
@@ -102,6 +107,7 @@ async function handleLogin(event) {
   button.firstElementChild.textContent = t('login.pending');
 
   try {
+    const otpVisible = !$('#otp-field').classList.contains('hidden');
     const user = await api('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify({
@@ -109,6 +115,8 @@ async function handleLogin(event) {
         password: $('#password').value,
         otp_code: $('#otp').value.trim() || null,
         language: LANG,
+        // Hors de l'étape 2FA, « null » signifie « ne touche pas à l'appareil mémorisé ».
+        trust_device: otpVisible ? $('#trust-device').checked : null,
       }),
     });
     state.user = user;
@@ -116,6 +124,7 @@ async function handleLogin(event) {
   } catch (exc) {
     if (exc.status === 428 || ['403', '404', '406'].includes(exc.dsmCode)) {
       $('#otp-field').classList.remove('hidden');
+      $('#trust-field').classList.remove('hidden');
       $('#otp').focus();
       error.textContent = exc.message || t('login.otpRequired');
     } else {
@@ -259,6 +268,20 @@ async function ask(question) {
   $('#send').classList.add('hidden');
   $('#stop').classList.remove('hidden');
 
+  const status = document.createElement('div');
+  status.className = 'msg-status';
+  assistant.querySelector('.bubble').appendChild(status);
+
+  const askedAt = Date.now();
+  let engine = null;
+  const refreshStatus = () => {
+    const name = engine ? (engine.model || engine.backend) : '…';
+    const s = ((Date.now() - askedAt) / 1000).toFixed(0);
+    status.textContent = t('app.working', { model: name, s });
+  };
+  refreshStatus();
+  const ticker = setInterval(refreshStatus, 1000);
+
   let answer = '';
   let started = false;
   try {
@@ -297,6 +320,8 @@ async function ask(question) {
 
         if (event === 'sources') {
           state.sources = payload.sources || [];
+          engine = payload.engine || null;
+          refreshStatus();
           renderSources(assistant, state.sources, payload);
         } else if (event === 'token') {
           if (!started) { textNode.innerHTML = ''; started = true; }
@@ -311,6 +336,7 @@ async function ask(question) {
         } else if (event === 'done') {
           answer = payload.answer || answer;
           textNode.innerHTML = renderMarkdown(answer);
+          renderStats(status, payload.engine || engine, payload.timing);
           addMessageTools(assistant, answer);
         }
       }
@@ -323,11 +349,30 @@ async function ask(question) {
       textNode.innerHTML = `<span class="error">${escapeHtml(exc.message || t('error.network'))}</span>`;
     }
   } finally {
+    clearInterval(ticker);
+    if (!status.classList.contains('final')) status.remove();
     state.controller = null;
     $('#send').classList.remove('hidden');
     $('#stop').classList.add('hidden');
     scrollToBottom();
   }
+}
+
+function renderStats(node, engine, timing) {
+  if (!timing) { node.remove(); return; }
+  const parts = [];
+  if (engine && engine.model) parts.push(engine.model);
+  else if (engine && engine.backend === 'extractive') parts.push(t('app.engineExtractive'));
+  else if (engine && engine.backend) parts.push(engine.backend);
+  parts.push(t('app.statTotal', { s: (timing.total_ms / 1000).toFixed(1) }));
+  if (timing.first_token_ms) {
+    parts.push(t('app.statFirst', { s: (timing.first_token_ms / 1000).toFixed(1) }));
+  }
+  if (timing.tokens_per_second) {
+    parts.push(t('app.statSpeed', { n: timing.tokens_per_second }));
+  }
+  node.textContent = parts.join(' · ');
+  node.classList.add('final');
 }
 
 function addMessageTools(node, answer) {
@@ -460,7 +505,9 @@ function renderModels(data) {
         </div>
         ${model.recommended ? `<span class="pill">${t('admin.recommended')}</span>` : ''}
         ${model.installed
-          ? `<span class="pill ok">${t('admin.installed')} (${formatBytes(model.size)})</span>`
+          ? `<span class="pill ok">${t('admin.installed')} (${formatBytes(model.size)})</span>
+             <button class="btn ghost small danger" data-delete="${model.profile}"
+                     title="${t('admin.deleteHint')}">${t('admin.delete')}</button>`
           : `<button class="btn small" data-download="${model.profile}">${t('admin.download')}</button>`}
       </div>`).join('')}`;
 }
@@ -548,9 +595,21 @@ function bindEvents() {
   $('#index-cancel').addEventListener('click', () => adminAction('/api/admin/index/cancel'));
   $('#index-optimize').addEventListener('click', () => adminAction('/api/admin/index/optimize'));
 
-  $('#panel-models').addEventListener('click', (event) => {
+  $('#panel-models').addEventListener('click', async (event) => {
     const profile = event.target.dataset?.download;
-    if (profile) adminAction('/api/admin/models/download', { profile });
+    if (profile) { adminAction('/api/admin/models/download', { profile }); return; }
+
+    const removable = event.target.dataset?.delete;
+    if (!removable) return;
+    if (!confirm(t('admin.deleteConfirm'))) return;
+    try {
+      const result = await api(`/api/admin/models?profile=${encodeURIComponent(removable)}`,
+        { method: 'DELETE' });
+      toast(t('admin.deleted', { size: formatBytes(result.freed_bytes) }));
+      await refreshAdmin();
+    } catch (exc) {
+      toast(exc.message);
+    }
   });
 
   $('#messages').addEventListener('click', (event) => {

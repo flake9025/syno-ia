@@ -57,7 +57,8 @@ C'est exactement le problème que `syno-ia` résout.
 ## Fonctionnalités
 
 - 🔐 **Authentification DSM native** — les comptes du NAS, y compris la double
-  authentification (OTP). Aucun compte à créer, aucun mot de passe stocké.
+  authentification (OTP), avec option *appareil de confiance*. Aucun compte à créer,
+  aucun mot de passe stocké.
 - 🛡️ **RAG cloisonné par les permissions DSM** — filtrage à deux niveaux (partages puis
   fichiers), systématiquement *fail-closed*.
 - 🔎 **Recherche hybride** — BM25 (SQLite FTS5) + similarité vectorielle, fusionnées par
@@ -67,7 +68,7 @@ C'est exactement le problème que `syno-ia` résout.
 - 🧠 **Modèles adaptés au matériel** — détection de la RAM, des cœurs et des jeux
   d'instructions SIMD, puis sélection automatique des embeddings et du LLM.
 - 💬 **Réponses citées, en flux** — chaque affirmation renvoie à `[1]`, `[2]`… cliquables
-  et ouvrant le document d'origine.
+  et ouvrant le document d'origine. Le moteur utilisé et les temps de réponse sont affichés.
 - 🪶 **Mode extractif** — sans aucun LLM, l'application répond en citant les passages
   pertinents. Utile sur un NAS vraiment modeste.
 - 🌍 **Interface français / anglais**, thème clair / sombre, sans étape de build.
@@ -320,6 +321,17 @@ Navigateur ──(compte + mot de passe DSM)──> syno-ia ──> SYNO.API.Aut
   tout le monde. C'est volontaire — aucun identifiant ne touche le disque.
 - Le statut administrateur est lu depuis DSM (`SYNO.FileStation.Info` → `is_manager`).
 
+**Appareil de confiance.** Si votre compte DSM utilise la double authentification, le code à
+usage unique est réclamé à chaque connexion. Cochez *Faire confiance à cet appareil* en saisissant
+le code : DSM émet alors un jeton d'appareil que `syno-ia` conserve dans un second cookie signé,
+valable `DEVICE_TRUST_DAYS` jours (30 par défaut).
+
+- Le **mot de passe reste exigé** à chaque connexion : seul le second facteur est allégé.
+- Le jeton est lié au compte qui l'a obtenu : il ne dispense pas un autre utilisateur du code.
+- Il survit à la déconnexion (c'est tout l'intérêt) ; pour l'oublier, décochez la case lors d'une
+  connexion avec code. Révoquer l'appareil depuis DSM le neutralise également.
+- `DEVICE_TRUST_DAYS=0` désactive complètement la fonction.
+
 ### 2. Chaque réponse est filtrée avec le `sid` de l'utilisateur
 
 ```
@@ -450,6 +462,15 @@ téléchargé, un modèle déjà présent est utilisé en attendant.
 | `RETRIEVAL_TOP_K=3` | Moins d'extraits envoyés au modèle. |
 | `LLM_BACKEND=none` | Réponses extractives, instantanées. |
 
+Chaque réponse affiche le moteur réellement utilisé et le temps passé (total, premier jeton,
+jetons/seconde) : de quoi mesurer l'effet de ces réglages sans quitter l'interface.
+
+#### Faire de la place
+
+⚙️ → *Modèles* liste le catalogue avec la taille des fichiers déjà téléchargés. Le bouton
+**Supprimer** efface le GGUF du NAS. Si le modèle supprimé était en service, le moteur est
+reconstruit aussitôt : il se rabat sur un autre modèle installé, ou sur le mode extractif.
+
 ---
 
 ## Variables d'environnement
@@ -468,6 +489,7 @@ Fichier complet et commenté : [`.env.example`](.env.example). L'essentiel :
 | `ACL_STRICT` | `true` | Vérification fichier par fichier des ACL avancées. |
 | `ACL_CACHE_TTL` | `300` | Durée de vie d'une décision d'accès (secondes). |
 | `SESSION_TTL_MINUTES` | `720` | Durée d'une session web. |
+| `DEVICE_TRUST_DAYS` | `30` | Durée de validité d'un appareil approuvé, dispensé du code 2FA (`0` = désactivé). Le mot de passe reste toujours exigé. |
 | `EMBEDDING_BACKEND` | `auto` | `auto`, `model2vec`, `fastembed`, `none`. |
 | `EMBEDDING_MODEL` | *(selon profil)* | Dépôt Hugging Face. En mode `fastembed`, le modèle **doit** figurer dans le catalogue ONNX (`TextEmbedding.list_supported_models()`), sinon l'application bascule automatiquement sur model2vec. |
 | `EMBEDDING_ASYNC_LOAD` | `true` | Charge le modèle en arrière-plan (voir [Premier démarrage](#premier-démarrage)). `false` rend le démarrage bloquant. |
@@ -488,9 +510,10 @@ est présente) → Ollama (s'il répond) → `llama.cpp` local (si un modèle es
 1. Ouvrez `http://<ip-du-nas>:8083` et connectez-vous avec votre compte DSM.
 2. La barre latérale affiche les partages indexés **que vous pouvez consulter**.
 3. Posez votre question. Les réponses arrivent en flux, avec des citations `[1]`, `[2]`…
-   cliquables qui ouvrent le document source.
+   cliquables qui ouvrent le document source. Sous chaque réponse figurent le moteur
+   utilisé et les temps mesurés.
 4. Les administrateurs disposent d'un panneau (⚙️) : état du matériel, avancement de
-   l'indexation, téléchargement de modèles, sessions actives, reconnexion DSM.
+   l'indexation, téléchargement et suppression de modèles, sessions actives, reconnexion DSM.
 
 La première indexation d'un corpus de quelques milliers de documents prend de 20 minutes à
 plusieurs heures sur un DS218+. Elle est incrémentale : les exécutions suivantes ne

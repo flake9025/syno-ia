@@ -82,6 +82,11 @@ class LlamaCppBackend(LLMBackend):
         with self._load_lock:
             self._llama = None
 
+    async def aclose(self) -> None:
+        # Libère la projection mémoire du GGUF : indispensable avant de supprimer
+        # le fichier, et pour rendre la RAM quand le moteur est remplacé.
+        self.unload()
+
     async def stream(
         self, messages: list[dict], *, temperature: float = 0.2, max_tokens: int = 700
     ) -> AsyncIterator[str]:

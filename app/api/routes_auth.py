@@ -7,7 +7,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
-from ..security import COOKIE_NAME, WebSession
+from ..security import COOKIE_NAME, DEVICE_COOKIE_NAME, WebSession
 from ..services import AppContext
 from ..synology.client import DSMError
 from .deps import current_session, get_context, is_admin, require_session
@@ -21,6 +21,13 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=512)
     otp_code: str | None = Field(default=None, max_length=16)
     language: str = Field(default="fr", max_length=8)
+    trust_device: bool | None = Field(
+        default=None,
+        description=(
+            "true : mémoriser cet appareil pour ne plus demander le code 2FA ; "
+            "false : l'oublier ; absent : ne rien changer"
+        ),
+    )
 
 
 class LoginResponse(BaseModel):
@@ -28,14 +35,21 @@ class LoginResponse(BaseModel):
     is_admin: bool
     language: str
     shares: list[str]
+    device_trusted: bool = False
 
 
-def _serialize(session: WebSession, context: AppContext, shares: list[str]) -> LoginResponse:
+def _serialize(
+    session: WebSession,
+    context: AppContext,
+    shares: list[str],
+    device_trusted: bool = False,
+) -> LoginResponse:
     return LoginResponse(
         account=session.account,
         is_admin=is_admin(session, context),
         language=session.language,
         shares=shares,
+        device_trusted=device_trusted,
     )
 
 
@@ -47,9 +61,20 @@ async def login(
     context: AppContext = Depends(get_context),
 ) -> LoginResponse:
     """Authentifie l'utilisateur auprès de DSM et ouvre une session web."""
+    account = payload.account.strip()
+    trust_enabled = context.settings.device_trust_days > 0
+    known_device = (
+        context.sessions.read_device(account, request.cookies.get(DEVICE_COOKIE_NAME))
+        if trust_enabled
+        else None
+    )
     try:
         dsm_session = await context.client.login(
-            payload.account.strip(), payload.password, payload.otp_code
+            account,
+            payload.password,
+            payload.otp_code,
+            device_id=known_device,
+            trust_device=bool(payload.trust_device) and trust_enabled,
         )
     except DSMError as exc:
         logger.info("Échec de connexion pour %s : %s", payload.account, exc)
@@ -60,6 +85,9 @@ async def login(
             status_code = status.HTTP_429_TOO_MANY_REQUESTS
         elif exc.code == 100:
             status_code = status.HTTP_502_BAD_GATEWAY
+        if known_device and exc.needs_otp:
+            # Le jeton a été révoqué depuis DSM : inutile de le représenter.
+            response.delete_cookie(DEVICE_COOKIE_NAME, path="/")
         raise HTTPException(
             status_code=status_code,
             detail=exc.message,
@@ -67,15 +95,36 @@ async def login(
         ) from exc
 
     token, session = context.sessions.create(dsm_session, language=payload.language or "fr")
+    secure = request.url.scheme == "https"
     response.set_cookie(
         COOKIE_NAME,
         token,
         httponly=True,
         samesite="lax",
-        secure=request.url.scheme == "https",
+        secure=secure,
         max_age=context.settings.session_ttl_minutes * 60,
         path="/",
     )
+
+    device_trusted = bool(known_device)
+    if trust_enabled and payload.trust_device and dsm_session.device_id:
+        response.set_cookie(
+            DEVICE_COOKIE_NAME,
+            context.sessions.sign_device(session.account, dsm_session.device_id),
+            httponly=True,
+            samesite="lax",
+            secure=secure,
+            max_age=context.settings.device_trust_days * 86400,
+            path="/",
+        )
+        device_trusted = True
+        logger.info("Appareil mémorisé pour %s", session.account)
+    elif payload.trust_device is False:
+        # Décocher la case est la façon d'oublier l'appareil ; une connexion
+        # silencieuse (case absente) le conserve.
+        response.delete_cookie(DEVICE_COOKIE_NAME, path="/")
+        device_trusted = False
+
     shares = [share.path for share in await context.access.shares_for(dsm_session)]
     logger.info(
         "Connexion réussie : %s (admin=%s, %d partage(s) accessible(s))",
@@ -83,7 +132,7 @@ async def login(
         dsm_session.is_admin,
         len(shares),
     )
-    return _serialize(session, context, shares)
+    return _serialize(session, context, shares, device_trusted)
 
 
 @router.post("/logout")

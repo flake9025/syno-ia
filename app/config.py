@@ -69,6 +69,9 @@ class Settings(BaseSettings):
 
     #: Durée de vie d'une session web (minutes).
     session_ttl_minutes: int = 720
+    #: Durée de validité d'un appareil de confiance, en jours (0 désactive la fonction).
+    #: Un appareil approuvé dispense du code 2FA, jamais du mot de passe.
+    device_trust_days: int = 30
     #: Durée de mise en cache d'une décision d'autorisation (secondes).
     acl_cache_ttl: int = 300
     #: Vérification fichier par fichier via FileStation en plus du filtre par

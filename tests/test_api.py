@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Iterator
 
 import numpy as np
@@ -27,7 +28,30 @@ LISIBLES = {
 }
 
 
-async def fake_login(account: str, password: str, otp_code: str | None = None) -> DSMSession:
+#: Comptes exigeant un second facteur, et le jeton d'appareil que DSM leur délivre.
+COMPTES_2FA = {"bob": "motdepasse"}
+JETON_APPAREIL = "did-bob-123"
+
+
+async def fake_login(
+    account: str,
+    password: str,
+    otp_code: str | None = None,
+    *,
+    device_id: str | None = None,
+    trust_device: bool = False,
+) -> DSMSession:
+    if account in COMPTES_2FA:
+        if password != COMPTES_2FA[account]:
+            raise DSMError(400)
+        # DSM n'accepte la connexion que sur présentation du code ou d'un appareil connu.
+        if device_id != JETON_APPAREIL and not otp_code:
+            raise DSMError(403)
+        session = DSMSession(sid=f"sid-{account}", account=account)
+        if trust_device and otp_code:
+            session.device_id = JETON_APPAREIL
+        return session
+
     session = COMPTES.get((account, password))
     if session is None:
         raise DSMError(400)
@@ -138,6 +162,67 @@ def test_cookie_falsifie_rejete(client: TestClient):
     assert client.get("/api/auth/me").json()["authenticated"] is False
 
 
+# ------------------------------------------------- appareil de confiance
+def connexion_2fa(client: TestClient, **extra):
+    charge = {"account": "bob", "password": "motdepasse"}
+    charge.update(extra)
+    return client.post("/api/auth/login", json=charge)
+
+
+def test_2fa_exigee_sans_appareil_connu(client: TestClient):
+    assert connexion_2fa(client).status_code == 428
+
+
+def test_appareil_memorise_dispense_du_code(client: TestClient):
+    """Après une approbation explicite, le code n'est plus réclamé."""
+    reponse = connexion_2fa(client, otp_code="123456", trust_device=True)
+    assert reponse.status_code == 200
+    assert reponse.json()["device_trusted"] is True
+    assert client.cookies.get("syno_ia_device")
+
+    client.post("/api/auth/logout")
+    # Le cookie d'appareil survit à la déconnexion : c'est tout l'intérêt.
+    suivante = connexion_2fa(client)
+    assert suivante.status_code == 200
+    assert suivante.json()["device_trusted"] is True
+
+
+def test_sans_approbation_aucun_appareil_memorise(client: TestClient):
+    reponse = connexion_2fa(client, otp_code="123456")
+    assert reponse.status_code == 200
+    assert reponse.json()["device_trusted"] is False
+    assert not client.cookies.get("syno_ia_device")
+    client.post("/api/auth/logout")
+    assert connexion_2fa(client).status_code == 428
+
+
+def test_decocher_la_case_oublie_lappareil(client: TestClient):
+    connexion_2fa(client, otp_code="123456", trust_device=True)
+    client.post("/api/auth/logout")
+
+    oubli = connexion_2fa(client, otp_code="123456", trust_device=False)
+    assert oubli.status_code == 200
+    assert oubli.json()["device_trusted"] is False
+    client.post("/api/auth/logout")
+    assert connexion_2fa(client).status_code == 428
+
+
+def test_jeton_dappareil_non_transferable(client: TestClient):
+    """Le cookie d'un compte ne doit pas dispenser un autre compte du second facteur."""
+    connexion_2fa(client, otp_code="123456", trust_device=True)
+    vole = client.cookies.get("syno_ia_device")
+    client.post("/api/auth/logout")
+
+    context = client.app.state.context
+    assert context.sessions.read_device("bob", vole) == JETON_APPAREIL
+    assert context.sessions.read_device("alice", vole) is None
+
+
+def test_cookie_dappareil_falsifie_ignore(client: TestClient):
+    client.cookies.set("syno_ia_device", "charge.bidon")
+    assert connexion_2fa(client).status_code == 428
+
+
 # ------------------------------------------------------------------- RAG
 def test_recherche_respecte_les_droits(client: TestClient):
     connexion(client)
@@ -213,7 +298,8 @@ async def test_battement_de_coeur_pendant_un_silence(monkeypatch: pytest.MonkeyP
 
     recus: list[str] = []
     reponse: list[str] = []
-    async for morceau in routes_chat._sse_tokens(generation_lente(), reponse):
+    flux = routes_chat._sse_tokens(generation_lente(), reponse, routes_chat._Timing())
+    async for morceau in flux:
         recus.append(morceau)
 
     assert recus.count(": ping\n\n") >= 2
@@ -232,7 +318,8 @@ async def test_battement_de_coeur_absent_si_les_jetons_affluent(
             yield mot
 
     reponse: list[str] = []
-    recus = [m async for m in routes_chat._sse_tokens(generation_rapide(), reponse)]
+    flux = routes_chat._sse_tokens(generation_rapide(), reponse, routes_chat._Timing())
+    recus = [m async for m in flux]
 
     assert all(not m.startswith(":") for m in recus)
     assert reponse == ["un", "deux"]
@@ -248,10 +335,37 @@ async def test_erreur_de_generation_remontee(monkeypatch: pytest.MonkeyPatch):
         raise LLMUnavailable("modèle absent")
 
     reponse: list[str] = []
+    flux = routes_chat._sse_tokens(generation_cassee(), reponse, routes_chat._Timing())
     with pytest.raises(LLMUnavailable):
-        async for _ in routes_chat._sse_tokens(generation_cassee(), reponse):
+        async for _ in flux:
             pass
     assert reponse == ["debut"]
+
+
+def test_chat_annonce_le_moteur_et_les_durees(client: TestClient):
+    """L'utilisateur doit pouvoir vérifier quel moteur a répondu et en combien de temps."""
+    connexion(client)
+    with client.stream("POST", "/api/chat", json={"question": "sauvegarde"}) as response:
+        corps = "".join(response.iter_text())
+
+    evenements = {}
+    for bloc in corps.split("\n\n"):
+        nom = charge = None
+        for ligne in bloc.split("\n"):
+            if ligne.startswith("event:"):
+                nom = ligne[6:].strip()
+            elif ligne.startswith("data:"):
+                charge = ligne[5:].strip()
+        if nom and charge:
+            evenements[nom] = json.loads(charge)
+
+    assert "engine" in evenements["sources"]
+    assert evenements["sources"]["retrieval_ms"] >= 0
+
+    final = evenements["done"]
+    assert final["engine"]["backend"] == "extractive"
+    assert final["timing"]["tokens"] > 0
+    assert final["timing"]["total_ms"] >= final["timing"]["first_token_ms"]
 
 
 # ----------------------------------------------------------------- admin
@@ -272,6 +386,35 @@ def test_admin_peut_purger_lindex(client: TestClient):
     assert client.post("/api/admin/index/clear").status_code == 200
     connexion(client, "admin")
     assert client.get("/api/admin/status").json()["index"]["documents"] == 0
+
+
+def test_suppression_modele_libere_lespace(client: TestClient):
+    from app.hardware import LLM_BY_PROFILE
+
+    connexion(client, "admin")
+    models_dir = client.app.state.context.settings.models_dir
+    models_dir.mkdir(parents=True, exist_ok=True)
+    fichier = models_dir / LLM_BY_PROFILE["micro"].filename
+    fichier.write_bytes(b"gguf" * 64)
+
+    reponse = client.request("DELETE", "/api/admin/models", params={"profile": "micro"})
+    assert reponse.status_code == 200
+    assert reponse.json()["freed_bytes"] == 256
+    assert not fichier.exists()
+
+
+def test_suppression_modele_absent_ou_inconnu(client: TestClient):
+    connexion(client, "admin")
+    absent = client.request("DELETE", "/api/admin/models", params={"profile": "large"})
+    assert absent.status_code == 404
+    inconnu = client.request("DELETE", "/api/admin/models", params={"profile": "geant"})
+    assert inconnu.status_code == 400
+
+
+def test_suppression_modele_reservee_aux_admins(client: TestClient):
+    connexion(client)
+    refuse = client.request("DELETE", "/api/admin/models", params={"profile": "micro"})
+    assert refuse.status_code == 403
 
 
 def test_route_api_inconnue(client: TestClient):

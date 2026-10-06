@@ -8,6 +8,7 @@ reconnexion, ce qui est volontaire (aucun identifiant persisté sur disque).
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import secrets
@@ -17,6 +18,8 @@ from dataclasses import dataclass, field
 from .synology.models import DSMSession
 
 COOKIE_NAME = "syno_ia_session"
+#: Cookie de l'appareil de confiance : contient le jeton émis par DSM, pas une session.
+DEVICE_COOKIE_NAME = "syno_ia_device"
 
 
 @dataclass
@@ -59,6 +62,31 @@ class SessionStore:
             return None
         expected = hmac.new(self._secret, token.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
         return token if hmac.compare_digest(expected, digest) else None
+
+    # --------------------------------------------------- appareil de confiance
+    def sign_device(self, account: str, device_id: str) -> str:
+        """Scelle le jeton DSM avec le compte auquel il appartient.
+
+        La signature n'est pas ce qui protège le jeton — DSM le valide de son côté —
+        mais elle garantit qu'un cookie bricolé ne sera jamais présenté à DSM, et que
+        le jeton d'un compte ne peut pas être rejoué pour un autre.
+        """
+        raw = f"{account}\x00{device_id}".encode()
+        return self._sign(base64.urlsafe_b64encode(raw).decode().rstrip("="))
+
+    def read_device(self, account: str, signed: str | None) -> str | None:
+        """Retourne le jeton d'appareil si le cookie est intact et concerne ce compte."""
+        payload = self._verify(signed) if signed else None
+        if not payload:
+            return None
+        try:
+            raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return None
+        stored_account, _, device_id = raw.partition("\x00")
+        if not device_id or not hmac.compare_digest(stored_account, account):
+            return None
+        return device_id
 
     # -------------------------------------------------------------- lifecycle
     def create(self, dsm: DSMSession, language: str = "fr") -> tuple[str, WebSession]:

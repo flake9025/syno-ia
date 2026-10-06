@@ -36,6 +36,11 @@
       <input type="text" id="otp" inputmode="numeric" autocomplete="one-time-code" maxlength="8">
     </label>
 
+    <label class="field-check hidden" id="trust-field">
+      <input type="checkbox" id="trust-device">
+      <span data-i18n="login.trustDevice">Ne plus demander de code sur cet appareil</span>
+    </label>
+
     <p id="login-error" class="error hidden" role="alert"></p>
 
     <button type="submit" class="btn primary" id="login-submit">

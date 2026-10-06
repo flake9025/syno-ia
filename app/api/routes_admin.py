@@ -224,6 +224,56 @@ async def download_status() -> dict:
     return _download.snapshot()
 
 
+@router.delete("/models")
+async def delete_model(
+    profile: str = Query(..., min_length=1, description="micro | small | medium | large"),
+    context: AppContext = Depends(get_context),
+) -> dict:
+    """Supprime un modèle téléchargé pour libérer de l'espace disque.
+
+    Si le modèle supprimé était celui en service, le moteur est reconstruit : il se
+    rabat alors sur un autre modèle installé, ou sur le mode extractif.
+    """
+    choice = LLM_BY_PROFILE.get(profile)
+    if choice is None:
+        raise HTTPException(status_code=400, detail=f"Profil inconnu : {profile}")
+    if _download.status == "running":
+        raise HTTPException(status_code=409, detail="Un téléchargement est en cours.")
+
+    path = context.settings.models_dir / choice.filename
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Ce modèle n'est pas installé.")
+
+    in_use = str(getattr(context.llm, "model_path", "")) == str(path)
+    if in_use and context.llm is not None:
+        # Libère le descripteur avant de supprimer : sur certains systèmes de
+        # fichiers, un modèle encore ouvert ne peut pas être effacé.
+        await context.llm.aclose()
+        context.llm = None
+
+    try:
+        freed = path.stat().st_size
+        path.unlink()
+    except OSError as exc:
+        logger.exception("Suppression du modèle impossible : %s", exc)
+        raise HTTPException(status_code=500, detail=f"Suppression impossible : {exc}") from exc
+
+    # Métadonnées laissées par huggingface_hub à côté du fichier.
+    residus = context.settings.models_dir / ".cache" / "huggingface" / "download"
+    if residus.is_dir():
+        for reste in residus.glob(f"{choice.filename}*"):
+            reste.unlink(missing_ok=True)
+
+    logger.info("Modèle supprimé : %s (%.0f Mo libérés)", choice.label, freed / 1_048_576)
+    if in_use:
+        context.llm = await build_llm(context.settings, context.hardware)
+    return {
+        "deleted": choice.label,
+        "freed_bytes": freed,
+        "llm": context.llm.describe() if context.llm else {"backend": "extractive"},
+    }
+
+
 @router.post("/llm/reload")
 async def reload_llm(context: AppContext = Depends(get_context)) -> dict:
     if context.llm is not None:
