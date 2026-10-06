@@ -24,6 +24,15 @@ router = APIRouter(prefix="/api", tags=["chat"])
 
 MAX_QUESTION_LENGTH = 2000
 
+#: Silence maximal toléré dans le flux SSE. Sur un NAS lent, le chargement du modèle
+#: puis l'analyse du contexte s'écoulent sans produire le moindre jeton ; un flux muet
+#: aussi longtemps est fermé par tout intermédiaire et ne rassure pas l'utilisateur.
+HEARTBEAT_SECONDS = 15.0
+
+#: Commentaire SSE : dépourvu de champ « data », il est ignoré par le client mais
+#: suffit à maintenir la connexion ouverte et à prouver que le serveur travaille.
+_HEARTBEAT = ": ping\n\n"
+
 
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=MAX_QUESTION_LENGTH)
@@ -33,6 +42,32 @@ class ChatRequest(BaseModel):
 
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+async def _sse_tokens(tokens: AsyncIterator[str], answer_parts: list[str]) -> AsyncIterator[str]:
+    """Relaie les jetons en SSE, en intercalant un battement de cœur pendant les silences."""
+    iterator = tokens.__aiter__()
+    pending: asyncio.Future | None = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.ensure_future(iterator.__anext__())
+            done, _ = await asyncio.wait({pending}, timeout=HEARTBEAT_SECONDS)
+            if not done:
+                yield _HEARTBEAT
+                continue
+            finished, pending = pending, None
+            try:
+                token = finished.result()
+            except StopAsyncIteration:
+                return
+            answer_parts.append(token)
+            yield _sse("token", {"text": token})
+    finally:
+        if pending is not None:
+            pending.cancel()
+            if pending.done() and not pending.cancelled():
+                pending.exception()
 
 
 @router.post("/chat")
@@ -47,10 +82,16 @@ async def chat(
 
     async def event_stream() -> AsyncIterator[str]:
         answer_parts: list[str] = []
+        retrieval = asyncio.ensure_future(
+            context.pipeline.retrieve(session.dsm, question, top_k=payload.top_k)
+        )
         try:
-            result = await context.pipeline.retrieve(
-                session.dsm, question, top_k=payload.top_k
-            )
+            while True:
+                done, _ = await asyncio.wait({retrieval}, timeout=HEARTBEAT_SECONDS)
+                if done:
+                    break
+                yield _HEARTBEAT
+            result = retrieval.result()
         except DSMError as exc:
             yield _sse("error", {"message": f"DSM : {exc.message}", "code": exc.code})
             return
@@ -58,6 +99,8 @@ async def chat(
             logger.exception("Échec de la récupération : %s", exc)
             yield _sse("error", {"message": "Erreur interne pendant la recherche."})
             return
+        finally:
+            retrieval.cancel()
 
         yield _sse(
             "sources",
@@ -82,27 +125,28 @@ async def chat(
                 messages = build_messages(
                     question, result.context, language=language, history=payload.history
                 )
-                async for token in context.llm.stream(
+                stream = context.llm.stream(
                     messages,
                     temperature=context.settings.llm_temperature,
                     max_tokens=context.settings.llm_max_tokens,
-                ):
-                    answer_parts.append(token)
-                    yield _sse("token", {"text": token})
+                )
+                async for chunk in _sse_tokens(stream, answer_parts):
+                    yield chunk
                 generated = True
             else:
-                async for token in stream_extractive_answer(
-                    question, result.hits, language=language
+                async for chunk in _sse_tokens(
+                    stream_extractive_answer(question, result.hits, language=language),
+                    answer_parts,
                 ):
-                    answer_parts.append(token)
-                    yield _sse("token", {"text": token})
+                    yield chunk
         except LLMUnavailable as exc:
             logger.warning("Moteur de génération indisponible, repli extractif : %s", exc)
             answer_parts.clear()
             yield _sse("notice", {"message": f"Génération indisponible ({exc}). Mode extractif."})
-            async for token in stream_extractive_answer(question, result.hits, language=language):
-                answer_parts.append(token)
-                yield _sse("token", {"text": token})
+            async for chunk in _sse_tokens(
+                stream_extractive_answer(question, result.hits, language=language), answer_parts
+            ):
+                yield chunk
         except asyncio.CancelledError:  # client déconnecté
             raise
         except Exception as exc:  # pragma: no cover - garde-fou

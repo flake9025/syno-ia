@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import asyncio
+from collections.abc import AsyncIterator, Iterator
 
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api import routes_chat
+from app.llm.base import LLMUnavailable
 from app.main import create_app
 from app.rag.store import Chunk, DocumentRecord
 from app.synology.client import DSMError
@@ -198,6 +201,57 @@ def test_chat_sans_document_autorise(client: TestClient):
     with client.stream("POST", "/api/chat", json={"question": "salaires"}) as response:
         corps = "".join(response.iter_text())
     assert "event: done" in corps
+
+
+async def test_battement_de_coeur_pendant_un_silence(monkeypatch: pytest.MonkeyPatch):
+    """Un flux muet émet des commentaires SSE : sans eux, la connexion serait coupée."""
+    monkeypatch.setattr(routes_chat, "HEARTBEAT_SECONDS", 0.01)
+
+    async def generation_lente() -> AsyncIterator[str]:
+        await asyncio.sleep(0.08)
+        yield "bonjour"
+
+    recus: list[str] = []
+    reponse: list[str] = []
+    async for morceau in routes_chat._sse_tokens(generation_lente(), reponse):
+        recus.append(morceau)
+
+    assert recus.count(": ping\n\n") >= 2
+    assert recus[-1] == 'event: token\ndata: {"text": "bonjour"}\n\n'
+    assert reponse == ["bonjour"]
+
+
+async def test_battement_de_coeur_absent_si_les_jetons_affluent(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Une génération fluide ne doit produire aucun commentaire parasite."""
+    monkeypatch.setattr(routes_chat, "HEARTBEAT_SECONDS", 10.0)
+
+    async def generation_rapide() -> AsyncIterator[str]:
+        for mot in ("un", "deux"):
+            yield mot
+
+    reponse: list[str] = []
+    recus = [m async for m in routes_chat._sse_tokens(generation_rapide(), reponse)]
+
+    assert all(not m.startswith(":") for m in recus)
+    assert reponse == ["un", "deux"]
+
+
+async def test_erreur_de_generation_remontee(monkeypatch: pytest.MonkeyPatch):
+    """Le relais ne doit pas avaler l'échec du moteur, sinon le repli extractif saute."""
+    monkeypatch.setattr(routes_chat, "HEARTBEAT_SECONDS", 0.01)
+
+    async def generation_cassee() -> AsyncIterator[str]:
+        yield "debut"
+        await asyncio.sleep(0.03)
+        raise LLMUnavailable("modèle absent")
+
+    reponse: list[str] = []
+    with pytest.raises(LLMUnavailable):
+        async for _ in routes_chat._sse_tokens(generation_cassee(), reponse):
+            pass
+    assert reponse == ["debut"]
 
 
 # ----------------------------------------------------------------- admin

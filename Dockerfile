@@ -96,7 +96,8 @@ ENV APP_VERSION=${APP_VERSION} \
     DATA_DIR=/app/data \
     HF_HOME=/app/data/models/hf \
     TOKENIZERS_PARALLELISM=false \
-    OMP_NUM_THREADS=2
+    OMP_NUM_THREADS=2 \
+    OMP_WAIT_POLICY=passive
 
 RUN mkdir -p /app/data/models
 
@@ -105,7 +106,10 @@ EXPOSE 8080
 
 # L'application répond dès le démarrage (recherche lexicale), le modèle d'embeddings
 # se chargeant en arrière-plan : la période de grâce n'a plus à couvrir son téléchargement.
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
+# La tolérance est large à dessein : sur un NAS bicœur, une génération accapare les
+# processeurs et peut retarder la réponse de la sonde. Un redémarrage en pleine réponse
+# couperait la connexion de l'utilisateur ; mieux vaut patienter cinq minutes.
+HEALTHCHECK --interval=30s --timeout=20s --start-period=60s --retries=10 \
   CMD curl -fsS "http://127.0.0.1:${PORT}/api/health" || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
