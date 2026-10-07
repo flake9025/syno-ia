@@ -2,16 +2,15 @@
 
 **Votre RAG privé, sur votre NAS Synology, avec *vos* permissions.**
 
-`syno-ia` est une application web auto-hébergée, dans l'esprit d'AnythingLLM, mais conçue
-pour un NAS Synology : vous posez une question en français, elle cherche la réponse dans
-**vos documents** et la restitue avec ses sources.
+`syno-ia` est une application web auto-hébergée pour NAS Synology : vous posez une question
+en français, elle cherche la réponse dans **vos documents** et la restitue avec ses sources.
 
 Sa particularité : **chaque utilisateur se connecte avec son compte DSM** et n'obtient de
 réponses que sur les documents auxquels **DSM l'autorise réellement**. Aucune fuite entre
 services, aucun document RH qui ressort dans le chat d'un stagiaire.
 
-Rien ne sort du NAS : indexation, recherche et génération se font en local (un service
-distant reste optionnel si vous le souhaitez).
+Indexation, recherche et rédaction se font **en local** : vos documents ne quittent jamais
+le NAS.
 
 ![Interface de syno-ia : réponse avec citations et liste des partages autorisés](docs/capture-interface.png)
 
@@ -24,8 +23,9 @@ ne peut pas remonter dans les réponses.*
 ## Sommaire
 
 - [Pourquoi ce projet](#pourquoi-ce-projet)
+- [Vos documents ne quittent jamais le NAS](#vos-documents-ne-quittent-jamais-le-nas)
 - [Fonctionnalités](#fonctionnalités)
-- [Configuration DSM](#configuration-dsm)
+- [Configuration Synology DSM](#configuration-synology-dsm)
 - [Installation sur le NAS](#installation-sur-le-nas)
   - [Rédaction déportée sur un PC (Ollama)](#variante--rédaction-déportée-sur-un-pc-ollama)
   - [Mise à jour en un clic](#mise-à-jour-en-un-clic-scriptsupdatesh)
@@ -47,44 +47,78 @@ Synology réserve ses fonctions d'IA locale aux modèles récents et bien dotés
 lui, n'aura jamais « AI Console ». Pourtant, avec 8 Go de RAM, il est parfaitement capable
 de faire tourner un RAG utile.
 
-Les solutions existantes (AnythingLLM, Open WebUI, Dify…) savent faire du RAG, mais elles
-gèrent leurs **propres** utilisateurs et leur **propre** silo de documents. Aucune ne sait
-dire : « cet utilisateur DSM n'a pas le droit de lire `/volume1/rh`, donc il ne doit jamais
-voir passer le moindre extrait de ce partage. »
+Les solutions existantes savent faire du RAG, mais elles gèrent leurs **propres**
+utilisateurs et leur **propre** silo de documents. Aucune ne sait dire : « cet utilisateur
+DSM n'a pas le droit de lire `/volume1/rh`, donc il ne doit jamais voir passer le moindre
+extrait de ce partage. »
 
 C'est exactement le problème que `syno-ia` résout.
 
 ---
 
-## Fonctionnalités
+## Vos documents ne quittent jamais le NAS
 
-- 🔐 **Authentification DSM native** — les comptes du NAS, y compris la double
-  authentification (OTP), avec option *appareil de confiance*. Aucun compte à créer,
-  aucun mot de passe stocké.
-- 🛡️ **RAG cloisonné par les permissions DSM** — filtrage à deux niveaux (partages puis
-  fichiers), systématiquement *fail-closed*.
-- 🔎 **Recherche hybride** — BM25 (SQLite FTS5) + similarité vectorielle, fusionnées par
-  *Reciprocal Rank Fusion*. Fonctionne bien même sur de petits corpus.
-- 📄 **Formats courants** — PDF, DOCX, PPTX, XLSX, CSV, HTML, Markdown, JSON, code source
-  et ~30 extensions texte, avec localisation de la source (page, diapositive, onglet).
-- 🧠 **Modèles adaptés au matériel** — détection de la RAM, des cœurs et des jeux
-  d'instructions SIMD, puis sélection automatique des embeddings et du LLM.
-- 💬 **Réponses citées, en flux** — chaque affirmation renvoie à `[1]`, `[2]`… cliquables
-  et ouvrant le document d'origine. Le moteur utilisé et les temps de réponse sont affichés.
-- 🪶 **Mode extractif** — sans aucun LLM, l'application répond en citant les passages
-  pertinents. Utile sur un NAS vraiment modeste.
-- 🌍 **Interface français / anglais**, thème clair / sombre, sans étape de build.
-- 🐳 **Un seul conteneur**, aucune base externe, aucun service tiers obligatoire.
+C'est l'intérêt principal du projet, et la raison d'accepter un matériel modeste.
+
+Les assistants en ligne (ChatGPT, Copilot, Gemini…) sont remarquables, mais les utiliser
+sur des documents personnels ou professionnels pose trois problèmes que rien ne permet de
+contourner côté utilisateur :
+
+- **Il faut envoyer le document.** Pour qu'un service distant réponde sur votre bail, vos
+  bulletins de salaire ou le contrat d'un client, il faut le lui transmettre. Un fichier
+  parti ne revient pas : vous ne savez ni où il est stocké, ni combien de temps, ni qui y
+  a accès en interne.
+- **Vous ne maîtrisez plus la conformité.** RGPD, secret professionnel, clauses de
+  confidentialité, données de santé, données appartenant à un tiers : la plupart de ces
+  engagements interdisent le transfert à un sous-traitant non prévu au contrat. Ce n'est
+  pas une question de confiance dans le prestataire, mais de ce que vous avez le droit de
+  faire.
+- **Les conditions changent.** Ce qui n'est pas utilisé pour l'entraînement aujourd'hui
+  peut l'être demain, et une fuite chez l'hébergeur expose un corpus entier d'un coup.
+
+Ici, le fichier reste sur votre disque. Le NAS le lit, le découpe, l'indexe et rédige la
+réponse. Une fois les modèles téléchargés, **aucune connexion sortante n'est nécessaire** :
+vous pouvez couper l'accès Internet du conteneur et vérifier que tout continue de
+fonctionner.
+
+S'y ajoute un effet moins évident : comme les permissions DSM sont appliquées à chaque
+question, vos collègues n'ont pas davantage accès à vos documents que d'habitude. Un RAG
+classique, lui, recopie tout dans un silo commun — et c'est souvent à ce moment-là que le
+cloisonnement disparaît.
+
+Deux nuances, pour rester honnête :
+
+- Si vous [déportez la rédaction sur un PC du réseau
+  local](#variante--rédaction-déportée-sur-un-pc-ollama), les données restent chez vous,
+  mais transitent **en clair** sur ce réseau.
+- Le recours à un service distant (OpenAI et compatibles) reste possible. Il est
+  **optionnel, désactivé par défaut**, et vous replace devant les limites ci-dessus.
 
 ---
 
-## Configuration DSM
+## Fonctionnalités
 
-> Ces quatre étapes sont à réaliser **avant** l'installation : le conteneur a besoin
-> du compte de service dès son premier démarrage, et refusera de dialoguer avec DSM
-> tant que les droits et le pare-feu ne sont pas en place.
+- 🔐 **Authentification DSM native**, double authentification (OTP) comprise
+- 🛡️ **RAG cloisonné par les permissions DSM**, *fail-closed*
+- 🔎 **Recherche hybride** — BM25 + similarité vectorielle
+- 📄 **Formats courants** — PDF, DOCX, PPTX, XLSX, CSV, HTML, Markdown, JSON, code source
+- 🧠 **Modèles adaptés au matériel**, détecté automatiquement
+- 💬 **Réponses citées, en flux**, avec liens vers les documents d'origine
+- 🖥️ **Rédaction déportée** sur un PC du réseau, avec repli sur le NAS
+- 🪶 **Mode extractif**, sans aucun LLM
+- 🌍 **Interface français / anglais**, thème clair / sombre
+- 🐳 **Un seul conteneur**, aucune base externe
 
-### 1. Créer un compte de service
+---
+
+## Configuration Synology DSM
+
+> **Seule l'étape 1 est à réaliser systématiquement.** Les étapes 2 à 4 décrivent des
+> réglages déjà corrects sur une installation DSM ordinaire : contentez-vous de les
+> **vérifier**, et revenez-y si quelque chose ne fonctionne pas — chacune correspond à une
+> panne précise, rappelée dans le [Dépannage](#dépannage).
+
+### 1. Créer un compte de service *(obligatoire)*
 
 **Panneau de configuration → Utilisateur et groupe → Créer**
 
@@ -101,15 +135,19 @@ C'est exactement le problème que `syno-ia` résout.
 Reportez le mot de passe dans `.env` (`DSM_SERVICE_PASSWORD`) ; `DSM_SERVICE_ACCOUNT` y
 vaut déjà `syno-ia-svc`.
 
-### 2. Autoriser les utilisateurs
+### 2. Autoriser les utilisateurs *(à vérifier)*
 
 Les utilisateurs qui se connecteront à `syno-ia` doivent eux aussi avoir le droit
 d'application **File Station** — c'est ce droit qui permet à `syno-ia` de vérifier leurs
-permissions en leur nom.
+permissions en leur nom. Il est **accordé par défaut** à tout nouveau compte DSM : vous
+n'avez rien à faire, sauf s'il a été explicitement retiré.
 
-### 3. Pare-feu et Auto Block
+*Symptôme en cas d'oubli : l'utilisateur se connecte mais ne voit aucun partage.*
 
-Le conteneur joint DSM par la passerelle du bridge Docker (`172.17.0.1:5000`).
+### 3. Pare-feu et Auto Block *(à vérifier)*
+
+Le conteneur joint DSM par la passerelle du bridge Docker (`172.17.0.1:5000`). **Si le
+pare-feu DSM est désactivé — c'est le cas par défaut — cette étape ne vous concerne pas.**
 
 - **Panneau de configuration → Sécurité → Pare-feu** : si un pare-feu est actif, ajoutez
   une règle d'autorisation pour la source `172.17.0.0/16` vers le port `5000`, **au-dessus**
@@ -119,15 +157,23 @@ Le conteneur joint DSM par la passerelle du bridge Docker (`172.17.0.1:5000`).
   adresse source : sans cela, un autre conteneur qui échoue ses connexions pourrait faire
   bloquer `syno-ia` — et réciproquement.
 
+*Symptôme en cas d'oubli : erreur `407` à la connexion.*
+
 `syno-ia` limite lui-même les dégâts : après un refus d'identifiants du compte de service,
 il **cesse** de réessayer jusqu'à une reconnexion manuelle depuis le panneau
 d'administration.
 
-### 4. HTTPS
+### 4. HTTPS *(facultatif)*
 
-Par défaut, `DSM_URL=http://172.17.0.1:5000` : le trafic ne quitte pas la machine. Pour
-utiliser HTTPS, mettez `https://172.17.0.1:5001` et laissez `DSM_VERIFY_SSL=false` si le
-certificat DSM est auto-signé.
+Par défaut, `DSM_URL=http://172.17.0.1:5000` : le trafic ne quitte pas la machine, et le
+chiffrer n'apporterait rien. Changez-le uniquement si votre politique interne l'impose —
+mettez alors `https://172.17.0.1:5001` et laissez `DSM_VERIFY_SSL=false` si le certificat
+DSM est auto-signé.
+
+Pour exposer `syno-ia` lui-même en HTTPS — une fois l'application installée — placez-le
+derrière le **Reverse Proxy** de DSM (Panneau de configuration → Portail de connexion →
+Reverse Proxy) en activant `WebSocket`/`HTTP/1.1` et en désactivant la mise en tampon des
+réponses (le chat utilise des flux SSE).
 
 Pour exposer `syno-ia` lui-même en HTTPS — une fois l'application installée — placez-le
 derrière le **Reverse Proxy** de DSM (Panneau de configuration → Portail de connexion →
@@ -140,14 +186,6 @@ réponses (le chat utilise des flux SSE).
 
 Le compte de service de l'étape précédente doit exister : notez son nom et son mot de
 passe, ils sont demandés dans le fichier `.env`.
-
-> **Si vous déployez votre propre fork.** GitHub publie les paquets GHCR en *privé* par
-> défaut, même pour un dépôt public : le NAS recevrait alors `unauthorized` au
-> `docker pull`. Après la première exécution réussie du workflow, passez le paquet en
-> *Public* depuis ses réglages
-> (`https://github.com/users/<vous>/packages/container/syno-ia/settings`), ou exportez
-> `GHCR_USER` et `GHCR_TOKEN` (portée `read:packages`) avant d'appeler
-> `deploy/deploy-nas.sh`. L'image officielle de ce dépôt est déjà publique.
 
 ### Quels dossiers seront indexés ?
 
@@ -740,11 +778,9 @@ la dimension ne correspond plus sont recalculés en arrière-plan.
 
 Choix techniques notables :
 
-- **Un seul fichier SQLite en WAL**, pas de base vectorielle externe. Les vecteurs sont
-  stockés normalisés en `float32` : le cosinus se réduit à un produit scalaire, et la
-  matrice NumPy est mise en cache en mémoire, invalidée par un compteur de génération.
+- **Un seul fichier SQLite en WAL**, pas de base vectorielle externe *(voir ci-dessous)*.
 - **RRF (k = 60)** plutôt qu'une somme pondérée : aucune calibration de scores nécessaire
-  entre BM25 et cosinus.
+  entre les deux moteurs de recherche.
 - **FTS5 avec `remove_diacritics 2`** : « procedure » trouve « procédure ».
 - **Aucune étape de build front-end** : pas de Node, pas de bundler, pas de CVE npm.
 - **Vérification ACL par lots de 20**, avec repli automatique chemin par chemin : DSM ne
@@ -754,6 +790,38 @@ Choix techniques notables :
   (`DeferredEmbedder`) que le pipeline et l'indexeur interrogent à chaque appel. Le
   remplacer à chaud suffit à faire basculer l'application de BM25 vers la recherche
   hybride, sans reconstruire aucun composant ni redémarrer le service.
+
+### Pourquoi pas de « base vectorielle » ?
+
+La plupart des projets de RAG installent une base dédiée (Chroma, Qdrant, Milvus…). Ici,
+tout tient dans le même fichier SQLite. Ce n'est pas un raccourci : c'est que, à cette
+échelle, une base vectorielle ne sert à rien.
+
+**Ce qu'on stocke.** Le modèle d'embeddings transforme chaque extrait de document en une
+liste de nombres — 256 sur un DS218+, jusqu'à 1024 avec les modèles les plus gros — qui
+résume son *sens*. Deux extraits qui parlent de la même chose obtiennent des listes
+proches, même sans aucun mot en commun. C'est ce qui permet de retrouver « congés payés »
+en cherchant « vacances ».
+
+**Comment on les range.** Cette liste est enregistrée telle quelle, dans une colonne
+binaire de la table des extraits. SQLite ne sait pas qu'il s'agit de vecteurs, et n'a pas
+besoin de le savoir : il sert ici de simple boîte de rangement. Le calcul, lui, se fait en
+mémoire.
+
+**Comment on cherche.** Chercher revient à comparer la question à chaque extrait et à
+garder les plus proches. C'est une comparaison exhaustive, sans malice. Sur un corpus réel
+de 25 000 extraits, cela représente environ six millions de multiplications : NumPy les
+effectue en quelques millisecondes, même sur le processeur modeste d'un DS218+ — et la
+table complète ne pèse qu'une trentaine de mégaoctets, chargée une fois pour toutes.
+
+**À quoi sert alors une base vectorielle ?** À éviter cette comparaison exhaustive quand
+elle devient trop coûteuse — à partir de quelques millions d'extraits. Elle emploie pour
+cela des index *approximatifs* : plus rapides, mais qui peuvent manquer le bon résultat.
+En dessous de ce seuil, on paierait un service supplémentaire à installer, à sauvegarder
+et à maintenir, en échange d'une recherche à la fois **moins exacte** et **pas plus
+rapide**.
+
+Conséquence pratique : une sauvegarde de `syno-ia`, c'est la copie d'un dossier.
 
 ---
 
