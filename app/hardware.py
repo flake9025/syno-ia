@@ -200,8 +200,16 @@ class HardwareProfile:
         return TUNING_BY_PROFILE.get(self.profile, TUNING_BY_PROFILE["micro"])
 
     def recommended_threads(self) -> int:
-        """Laisse au moins un cœur à DSM dès que la machine en possède plus de deux."""
-        return max(1, self.cpu_count - 1) if self.cpu_count > 2 else max(1, self.cpu_count)
+        """Laisse **toujours** un cœur libre au serveur web.
+
+        Les fils de calcul de ggml tournent en attente active : occuper tous les
+        cœurs n'affame pas seulement la génération, mais la boucle d'événements
+        elle-même. Sur un NAS bicœur, la sonde de santé cessait alors de répondre
+        et le conteneur était redémarré en pleine réponse — l'utilisateur voyait
+        une erreur réseau et se retrouvait déconnecté. Un cœur de moins coûte du
+        débit ; zéro cœur disponible coûtait la réponse entière.
+        """
+        return max(1, self.cpu_count - 1)
 
     def estimated_tokens_per_second(self) -> float:
         """Estimation grossière du débit de génération d'un modèle Q4 local."""
@@ -212,7 +220,9 @@ class HardwareProfile:
             self.profile
         ]
         simd = 2.2 if self.has_avx2 else (1.4 if self.has_avx else 1.0)
-        return round(max(0.2, (5.5 * self.cpu_count * simd) / billions), 1)
+        # Le débit suit les fils réellement alloués, pas le nombre de cœurs :
+        # l'un d'eux reste libre pour que le serveur continue de répondre.
+        return round(max(0.2, (5.5 * self.recommended_threads() * simd) / billions), 1)
 
     def recommends_remote_llm(self) -> bool:
         """Un LLM local est-il déconseillé sur cette machine ?"""

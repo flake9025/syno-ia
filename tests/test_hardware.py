@@ -73,6 +73,18 @@ def test_le_profil_nano_reste_coherent():
     assert hardware.tuning()["retrieval_top_k"] > 0
 
 
+def test_un_coeur_reste_libre_pour_le_serveur():
+    """Sur un bicœur, saturer les deux cœurs faisait redémarrer le conteneur.
+
+    Les fils de calcul de ggml tournent en attente active : sans cœur libre, la
+    sonde de santé cessait de répondre et la réponse en cours était perdue.
+    """
+    assert profile(cpu=2, ram=6800, flags=["sse4_2"], total=8192).recommended_threads() == 1
+    assert profile(cpu=4, ram=6800, flags=["avx2"], total=8192).recommended_threads() == 3
+    # Un monocœur ne peut rien réserver, mais ne doit jamais tomber à zéro.
+    assert profile(cpu=1, ram=1200, flags=[], total=2048).recommended_threads() == 1
+
+
 def test_le_prompt_suit_le_processeur_pas_la_memoire():
     """Un DS218+ a 8 Go mais un CPU lent : le prompt doit rester court.
 

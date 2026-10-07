@@ -280,6 +280,26 @@ dans `/app/data/models` et survit aux mises à jour.
 Tant que le modèle n'est pas téléchargé, `LLM_BACKEND=auto` laisse l'application en mode
 extractif ; elle bascule toute seule sur `llamacpp` dès que le fichier est présent.
 
+### Mettre à jour
+
+Reprenez **la même étiquette qu'au démarrage** : `:latest-llm` avec le LLM local,
+`:latest` sinon. Se tromper d'étiquette remplace silencieusement l'image par une
+variante dépourvue de `llama.cpp`.
+
+```bash
+sudo docker pull ghcr.io/flake9025/syno-ia:latest-llm
+sudo docker stop syno-ia && sudo docker rm syno-ia
+# puis relancez la commande « docker run » ci-dessus, à l'identique
+```
+
+`docker rm` ne supprime que le conteneur : l'index, les appareils mémorisés et les
+modèles GGUF résident dans `/volume1/docker/apps/syno-ia/data` et sont conservés.
+
+Pour vérifier que la nouvelle image tourne réellement, ouvrez
+`http://<adresse-du-nas>:8083/api/health` : `build` porte l'empreinte du commit déployé
+et `uptime` repart de zéro. Le panneau ⚙️ → *Modèles* reflète lui aussi la version : si
+le modèle `nano` n'y figure pas, c'est que l'ancienne image tourne encore.
+
 ### Variante sans aucun montage
 
 Mêmes paramètres, mais `INDEX_MODE=filestation` et plus aucun montage de partage — seul
@@ -445,6 +465,7 @@ mémoire, qui doit relire le contexte avant de produire le premier mot.
 | Niveau calcul | `micro` (score ≈ 2,0) |
 | **Profil retenu** | **`nano`** — LFM2 350M Q4_K_M, 229 Mo |
 | Taille du prompt | 2000 caractères, 3 extraits |
+| Fils de génération | 1 — le second cœur reste au serveur web |
 | Embeddings | model2vec (statiques, pas d'ONNX : trop lent sans AVX) |
 
 LFM2 350M est conçu pour l'embarqué et reste **multilingue, français compris**. Il est
@@ -519,6 +540,7 @@ Fichier complet et commenté : [`.env.example`](.env.example). L'essentiel :
 | `EMBEDDING_BACKFILL_BATCH` | `64` | Fragments vectorisés par lot lors du rattrapage. |
 | `LLM_BACKEND` | `auto` | `auto`, `llamacpp`, `ollama`, `openai`, `none`. |
 | `LLM_TIMEOUT_SECONDS` | `120` | Délai maximal d'une génération ; au-delà, la réponse est tronquée proprement, ou remplacée par les extraits trouvés si aucun mot n'a été produit (`0` = sans limite). |
+| `LLM_THREADS` | `0` | Fils de calcul llama.cpp. `0` = automatique : **un cœur reste toujours libre** pour que le serveur continue de répondre pendant la génération. Ne montez à `cpu_count` qu'au prix de redémarrages intempestifs. |
 | `OLLAMA_URL` | `http://172.17.0.1:11434` | Ollama local ou distant. |
 | `OPENAI_API_KEY` | *(vide)* | Service compatible OpenAI. |
 | `HARDWARE_PROFILE` | `auto` | Forçage du profil (`nano`…`large`). |
@@ -633,7 +655,8 @@ Choix techniques notables :
 | `État : indisponible` dans le panneau *Moteur* | Téléchargement du modèle impossible (réseau, DNS, quota Hugging Face) | L'application reste utilisable en BM25. Rétablissez l'accès sortant du conteneur, puis relancez le chargement sans redémarrer : `POST /api/admin/embeddings/reload` |
 | Réponses très lentes | Prompt trop long pour le CPU, ou LLM trop gros | Mettez l'image à jour : le prompt suit désormais le processeur. Sinon `CONTEXT_MAX_CHARS=1500`, `LLM_MAX_TOKENS=350`, ou `LLM_BACKEND=none` (extractif) |
 | « Le serveur est injoignable » après une longue attente | La génération n'aboutissait pas et bloquait la requête | Mettez l'image à jour : le prompt est raccourci sur les CPU lents, et la génération s'arrête d'elle-même à `LLM_TIMEOUT_SECONDS` |
-| « Le serveur est injoignable » au bout d'une minute, le conteneur a redémarré | La génération saturait le CPU et la sonde de santé expirait | Mettez l'image à jour (`docker pull`) : la sonde est désormais tolérante et le flux émet un battement de cœur |
+| « Le serveur est injoignable » au bout d'une minute, le conteneur a redémarré | La génération occupait **tous** les cœurs : la sonde de santé n'était plus servie | Mettez l'image à jour (`docker pull ghcr.io/flake9025/syno-ia:latest-llm`) : un cœur est désormais réservé au serveur web |
+| Le modèle `nano` n'apparaît pas dans ⚙️ → *Modèles* | L'ancienne image tourne encore | Voir [Mettre à jour](#mettre-à-jour) — vérifiez l'étiquette `:latest-llm` et le champ `build` de `/api/health` |
 | Le chat n'affiche rien derrière un reverse proxy | Mise en tampon des réponses SSE | Désactivez le *buffering* dans la configuration du proxy |
 
 Journaux : `docker logs -f syno-ia`. État du service : `GET /api/health` (public, sans
