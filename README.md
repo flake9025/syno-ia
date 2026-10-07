@@ -237,13 +237,10 @@ cd /volume1/docker/apps/syno-ia
 # 1. Configuration de départ
 curl -fsSL https://raw.githubusercontent.com/flake9025/syno-ia/main/.env.example -o .env
 
-# 2. Clé de signature des sessions (à générer avant le premier démarrage)
-echo "APP_SECRET=$(openssl rand -hex 32)" >> .env
-
-# 3. Mot de passe du compte de service créé à l'étape « Configuration DSM »
+# 2. Mot de passe du compte de service créé à l'étape « Configuration DSM »
 vi .env          # DSM_SERVICE_PASSWORD
 
-# 4. Démarrage — cette commande fonctionne telle quelle
+# 3. Démarrage — cette commande fonctionne telle quelle
 sudo docker run -d \
   --name syno-ia \
   -p 8083:8080 \
@@ -463,7 +460,9 @@ Navigateur ──(compte + mot de passe DSM)──> syno-ia ──> SYNO.API.Aut
 - Le `sid` DSM **ne quitte jamais le serveur**. Le navigateur reçoit un jeton opaque signé
   (HMAC-SHA256) dans un cookie `HttpOnly`, `SameSite=Lax`.
 - Les sessions vivent **en mémoire uniquement** : un redémarrage du conteneur déconnecte
-  tout le monde. C'est volontaire — aucun identifiant ne touche le disque.
+  tout le monde. C'est volontaire — aucun identifiant ne touche le disque. En revanche la clé
+  qui signe les cookies, elle, est conservée (`data/secret.key`) : vous devrez ressaisir votre
+  mot de passe après une mise à jour, mais **pas** un nouveau code 2FA.
 - Le statut administrateur est lu depuis DSM (`SYNO.FileStation.Info` → `is_manager`).
 
 **Appareil de confiance.** Si votre compte DSM utilise la double authentification, le code à
@@ -473,8 +472,9 @@ valable `DEVICE_TRUST_DAYS` jours (30 par défaut).
 
 - Le **mot de passe reste exigé** à chaque connexion : seul le second facteur est allégé.
 - Le jeton est lié au compte qui l'a obtenu : il ne dispense pas un autre utilisateur du code.
-- Il survit à la déconnexion (c'est tout l'intérêt) ; pour l'oublier, décochez la case lors d'une
-  connexion avec code. Révoquer l'appareil depuis DSM le neutralise également.
+- Il survit à la déconnexion **et aux mises à jour du conteneur** (c'est tout l'intérêt) ; pour
+  l'oublier, décochez la case lors d'une connexion avec code. Révoquer l'appareil depuis DSM le
+  neutralise également.
 - `DEVICE_TRUST_DAYS=0` désactive complètement la fonction.
 
 ### 2. Chaque réponse est filtrée avec le `sid` de l'utilisateur
@@ -654,7 +654,7 @@ Fichier complet et commenté : [`.env.example`](.env.example). L'essentiel :
 
 | Variable | Défaut | Description |
 |---|---|---|
-| `APP_SECRET` | *(aléatoire)* | Clé de signature des cookies. **À fixer** en production. |
+| `APP_SECRET` | *(généré une fois)* | Clé de signature des cookies. Si elle n'est pas fournie, elle est générée au premier démarrage puis conservée dans `data/secret.key`. |
 | `DSM_URL` | `http://172.17.0.1:5000` | DSM vu depuis le conteneur. |
 | `DSM_SERVICE_ACCOUNT` / `DSM_SERVICE_PASSWORD` | `syno-ia-svc` / — | Compte de service pour l'indexation. |
 | `ADMIN_ACCOUNTS` | *(vide)* | Comptes DSM admin de `syno-ia` en plus des admins DSM. |
@@ -844,6 +844,7 @@ Conséquence pratique : une sauvegarde de `syno-ia`, c'est la copie d'un dossier
 | Le modèle `nano` n'apparaît pas dans ⚙️ → *Modèles* | L'ancienne image tourne encore | Voir [Mettre à jour](#mettre-à-jour) — vérifiez l'étiquette `:latest-llm` et le champ `build` de `/api/health` |
 | Le bouton *Tester* ne joint pas Ollama, alors que `http://localhost:11434` marche sur le PC | Ollama n'écoute que sur `127.0.0.1` | `setx OLLAMA_HOST "0.0.0.0"`, **redémarrez Ollama**, puis ouvrez le port 11434 dans le pare-feu Windows pour le réseau privé |
 | La rédaction repart sur le NAS alors qu'Ollama est configuré | Le PC était éteint ou injoignable au moment de la question | C'est le repli voulu. Le moteur réellement utilisé est affiché sous chaque réponse et dans le bandeau |
+| Un code 2FA est réclamé après chaque mise à jour, malgré *Faire confiance à cet appareil* | La clé de signature était régénérée à chaque démarrage : le cookie d'appareil devenait invalide | Mettez l'image à jour. La clé est désormais conservée dans `data/secret.key`. **La première mise à jour redemandera encore un code** — la clé n'existe pas avant ce démarrage-là |
 | Le chat n'affiche rien derrière un reverse proxy | Mise en tampon des réponses SSE | Désactivez le *buffering* dans la configuration du proxy |
 
 Journaux : `docker logs -f syno-ia`. État du service : `GET /api/health` (public, sans
@@ -859,7 +860,8 @@ aucune statistique d'index). Diagnostic complet, dont les compteurs d'indexation
   mérite d'être validée sur votre DSM.
 - DSM ne distingue pas toujours « accès refusé » de « fichier introuvable ». Dans les deux
   cas, `syno-ia` refuse — ce qui est le comportement sûr.
-- Les sessions étant en mémoire, une mise à jour du conteneur déconnecte les utilisateurs.
+- Les sessions étant en mémoire, une mise à jour du conteneur demande de ressaisir son mot de
+  passe. Les appareils de confiance, eux, survivent : aucun nouveau code 2FA n'est réclamé.
 - Le RAG ne gère pas l'OCR : un PDF scanné sans couche texte ne sera pas indexé.
 - Les fichiers de plus de `INDEX_MAX_FILE_MB` (40 Mo par défaut) sont ignorés.
 - **La génération de texte sur un NAS d'entrée de gamme est lente, par construction.** Le

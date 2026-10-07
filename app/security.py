@@ -45,6 +45,11 @@ class SessionStore:
     """Registre en mémoire des sessions web actives."""
 
     def __init__(self, secret: str, ttl_minutes: int = 720) -> None:
+        if not secret:
+            # Une clé vide produirait un HMAC que n'importe qui peut recalculer :
+            # les cookies de session deviendraient falsifiables. Mieux vaut refuser
+            # de démarrer que de servir une authentification de façade.
+            raise ValueError("Clé de signature absente : refus de démarrer sans APP_SECRET")
         self._secret = secret.encode("utf-8")
         self._ttl = max(5, ttl_minutes) * 60
         self._sessions: dict[str, WebSession] = {}

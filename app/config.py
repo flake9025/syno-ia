@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-import os
+import logging
+import secrets
+from contextlib import suppress
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 #: Les listes se saisissent en clair (« a,b,c ») dans .env et docker-compose.
 #: `NoDecode` empêche pydantic-settings de tenter un `json.loads` au préalable.
@@ -40,9 +44,12 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     default_language: str = "fr"
 
-    #: Clé de signature des jetons de session. Générée aléatoirement si absente
-    #: (les sessions sont alors invalidées à chaque redémarrage).
-    app_secret: str = Field(default_factory=lambda: os.urandom(32).hex())
+    #: Clé de signature des jetons de session et des appareils de confiance.
+    #: Laissée vide, elle est tirée au hasard **puis conservée** dans
+    #: `data_dir/secret.key` : sans cela, chaque redémarrage du conteneur
+    #: invaliderait les sessions *et* les appareils mémorisés, obligeant à
+    #: ressaisir un code 2FA après chaque mise à jour.
+    app_secret: str = ""
 
     #: Répertoire persistant (index SQLite, modèles téléchargés).
     data_dir: Path = Path("/app/data")
@@ -176,6 +183,10 @@ class Settings(BaseSettings):
         return self.data_dir / "models"
 
     @property
+    def secret_path(self) -> Path:
+        return self.data_dir / "secret.key"
+
+    @property
     def has_service_account(self) -> bool:
         return bool(self.dsm_service_account and self.dsm_service_password)
 
@@ -183,11 +194,55 @@ class Settings(BaseSettings):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.models_dir.mkdir(parents=True, exist_ok=True)
 
+    def ensure_secret(self) -> None:
+        """Garantit une clé de signature stable d'un démarrage à l'autre.
+
+        Une clé tirée au hasard à chaque lancement invalidait les cookies signés,
+        donc aussi les **appareils de confiance** : l'utilisateur devait ressaisir
+        un code 2FA après chaque mise à jour du conteneur. La clé est désormais
+        conservée à côté de l'index, dans le volume persistant.
+
+        Une valeur fournie par l'environnement l'emporte toujours : c'est le seul
+        moyen de partager la même clé entre plusieurs instances.
+        """
+        if self.app_secret:
+            return
+
+        fichier = self.secret_path
+        try:
+            contenu = fichier.read_text(encoding="utf-8").strip()
+            if contenu:
+                self.app_secret = contenu
+                return
+        except OSError:
+            pass
+
+        self.app_secret = secrets.token_hex(32)
+        try:
+            fichier.parent.mkdir(parents=True, exist_ok=True)
+            # Écriture atomique, puis restriction des droits : ce fichier signe
+            # les sessions, il ne doit pas être lisible par les autres comptes.
+            provisoire = fichier.with_suffix(".tmp")
+            provisoire.write_text(self.app_secret, encoding="utf-8")
+            with suppress(OSError, NotImplementedError):
+                provisoire.chmod(0o600)
+            provisoire.replace(fichier)
+        except OSError as exc:
+            # Volume en lecture seule : l'application reste utilisable, mais les
+            # sessions et les appareils de confiance ne survivront pas au
+            # redémarrage. Mieux vaut le dire que le laisser deviner.
+            logger.warning(
+                "Clé de signature non persistée (%s) : les appareils mémorisés "
+                "seront oubliés au prochain redémarrage.",
+                exc,
+            )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     settings = Settings()
     settings.ensure_dirs()
+    settings.ensure_secret()
     # Les réglages choisis depuis l'administration priment sur l'environnement :
     # sans quoi un redémarrage du conteneur les effacerait.
     from .overrides import appliquer
