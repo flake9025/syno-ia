@@ -6,6 +6,10 @@ Ordre de préférence en mode « auto » :
 2. un serveur Ollama joignable (idéal : un PC du réseau, bien plus puissant que le NAS) ;
 3. llama.cpp en local **si** le profil matériel le supporte et que le modèle est présent ;
 4. aucun moteur → réponses extractives (voir `extractive.py`).
+
+Quand Ollama est retenu, le moteur local est conservé en second rideau : le PC qui
+l'héberge peut s'éteindre entre deux questions, et la bascule se fait alors toute
+seule au lieu de renvoyer une erreur (voir `chain.py`).
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ from pathlib import Path
 from ..config import Settings
 from ..hardware import LLM_BY_PROFILE, MODEL_ORDER, HardwareProfile
 from .base import LLMBackend
+from .chain import ChainBackend
 from .llamacpp import LlamaCppBackend, llama_cpp_available
 from .ollama import OllamaBackend
 from .openai_compat import OpenAICompatibleBackend
@@ -105,8 +110,18 @@ async def build_llm(settings: Settings, hardware: HardwareProfile) -> LLMBackend
                 candidate.model = _pick_ollama_model(models)
             if candidate.model:
                 logger.info("Moteur retenu : Ollama %s (%s)", candidate.model, settings.ollama_url)
+                # Le PC qui héberge Ollama peut s'éteindre à tout moment : on garde
+                # le moteur local en second rideau plutôt que de perdre la réponse.
+                local = _build_llamacpp(settings, hardware, silent=True)
+                if local is not None:
+                    logger.info("Repli prévu sur llama.cpp local (%s)", local.model)
+                    return ChainBackend([candidate, local])
                 return candidate
             logger.warning("Ollama est joignable mais aucun modèle n'est installé")
+        else:
+            logger.warning(
+                "Ollama injoignable sur %s : repli sur le moteur local", settings.ollama_url
+            )
         await candidate.aclose()
 
     local = _build_llamacpp(settings, hardware, silent=True)
@@ -154,6 +169,7 @@ def _build_llamacpp(
         path,
         context_size=settings.llm_context_size,
         threads=settings.llm_threads or hardware.recommended_threads(),
+        batch_size=settings.llm_batch_size,
         model_label=labels.get(path.name, path.name),
     )
 

@@ -7,11 +7,13 @@ import logging
 import time
 from dataclasses import dataclass, field
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from .. import overrides
 from ..hardware import LLM_BY_PROFILE
 from ..llm.factory import build_llm, download_model, local_model_path
+from ..llm.ollama import OllamaBackend
 from ..security import WebSession
 from ..services import AppContext
 from .deps import get_context, require_admin
@@ -51,6 +53,19 @@ class IndexRequest(BaseModel):
 
 class ModelRequest(BaseModel):
     profile: str | None = Field(default=None, description="micro | small | medium | large")
+
+
+class RemoteLLMRequest(BaseModel):
+    """Configuration d'un moteur de génération déporté (Ollama)."""
+
+    ollama_url: str = Field(default="", max_length=300)
+    llm_model: str = Field(default="", max_length=120)
+    llm_backend: str | None = Field(default=None, description="auto | ollama | llamacpp | none")
+    llm_timeout_seconds: int | None = Field(default=None, ge=0, le=3600)
+
+
+class RemoteTestRequest(BaseModel):
+    ollama_url: str = Field(default="", max_length=300)
 
 
 @router.get("/status")
@@ -280,6 +295,101 @@ async def reload_llm(context: AppContext = Depends(get_context)) -> dict:
         await context.llm.aclose()
     context.llm = await build_llm(context.settings, context.hardware)
     return {"llm": context.llm.describe() if context.llm else {"backend": "extractive"}}
+
+
+# --------------------------------------------------------- génération déportée
+def _adresse_client(request: Request) -> str:
+    """Adresse du poste qui consulte l'administration.
+
+    Elle sert à pré-remplir l'URL d'Ollama : c'est presque toujours la machine sur
+    laquelle l'utilisateur travaille, et la deviner lui évite de la chercher.
+    """
+    transmis = request.headers.get("x-forwarded-for", "")
+    if transmis:
+        return transmis.split(",")[0].strip()
+    return request.client.host if request.client else ""
+
+
+@router.get("/llm/remote")
+async def remote_llm(
+    request: Request, context: AppContext = Depends(get_context)
+) -> dict:
+    client = _adresse_client(request)
+    prive = client and not client.startswith(("127.", "::1"))
+    return {
+        "backend": context.settings.llm_backend,
+        "ollama_url": context.settings.ollama_url,
+        "llm_model": context.settings.llm_model,
+        "llm_timeout_seconds": context.settings.llm_timeout_seconds,
+        "client_ip": client,
+        "suggested_url": f"http://{client}:11434" if prive else "",
+    }
+
+
+@router.post("/llm/remote/test")
+async def test_remote_llm(payload: RemoteTestRequest) -> dict:
+    """Teste la connexion **depuis le NAS**, seul point de vue qui compte ici.
+
+    Un Ollama joignable depuis le navigateur ne l'est pas forcément depuis le
+    conteneur : c'est précisément le piège que ce test révèle.
+    """
+    url = (payload.ollama_url or "").strip().rstrip("/")
+    try:
+        overrides.valider({"ollama_url": url})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not url:
+        raise HTTPException(status_code=400, detail="Indiquez une adresse à tester.")
+
+    sonde = OllamaBackend(url, "")
+    try:
+        if not await sonde.health():
+            return {
+                "reachable": False,
+                "models": [],
+                "detail": (
+                    "Aucune réponse. Vérifiez qu'Ollama tourne, qu'il écoute sur "
+                    "toutes les interfaces (OLLAMA_HOST=0.0.0.0) et que le pare-feu "
+                    "autorise le port 11434 depuis le NAS."
+                ),
+            }
+        modeles = await sonde.list_models()
+    finally:
+        await sonde.aclose()
+
+    return {
+        "reachable": True,
+        "models": modeles,
+        "detail": (
+            "Connexion établie, mais aucun modèle n'est installé : lancez "
+            "« ollama pull qwen2.5:7b-instruct »."
+            if not modeles
+            else f"Connexion établie : {len(modeles)} modèle(s) disponible(s)."
+        ),
+    }
+
+
+@router.post("/llm/remote")
+async def save_remote_llm(
+    payload: RemoteLLMRequest, context: AppContext = Depends(get_context)
+) -> dict:
+    valeurs: dict = {"ollama_url": payload.ollama_url, "llm_model": payload.llm_model}
+    if payload.llm_backend is not None:
+        valeurs["llm_backend"] = payload.llm_backend
+    if payload.llm_timeout_seconds is not None:
+        valeurs["llm_timeout_seconds"] = payload.llm_timeout_seconds
+    try:
+        overrides.enregistrer(context.settings, valeurs)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if context.llm is not None:
+        await context.llm.aclose()
+    context.llm = await build_llm(context.settings, context.hardware)
+    return {
+        "saved": True,
+        "llm": context.llm.describe() if context.llm else {"backend": "extractive"},
+    }
 
 
 # ----------------------------------------------------------------- diagnostic

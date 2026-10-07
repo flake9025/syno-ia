@@ -115,6 +115,11 @@
     </div>
 
     <form class="composer" id="composer">
+      <label class="composer-options" for="use-llm">
+        <input type="checkbox" id="use-llm" checked>
+        <span data-i18n="app.useLlm">Rédiger une réponse avec l'IA</span>
+        <span class="composer-hint" id="use-llm-hint"></span>
+      </label>
       <textarea id="question" rows="1" placeholder="Posez votre question…"
                 data-i18n-placeholder="app.placeholder" maxlength="2000"></textarea>
       <button type="submit" class="btn primary send" id="send" aria-label="Envoyer">↑</button>

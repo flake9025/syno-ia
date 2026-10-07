@@ -27,6 +27,8 @@ ne peut pas remonter dans les réponses.*
 - [Fonctionnalités](#fonctionnalités)
 - [Configuration DSM](#configuration-dsm)
 - [Installation sur le NAS](#installation-sur-le-nas)
+  - [Rédaction déportée sur un PC (Ollama)](#variante--rédaction-déportée-sur-un-pc-ollama)
+  - [Mise à jour en un clic](#mise-à-jour-en-un-clic-scriptsupdatesh)
 - [Modèle de sécurité](#modèle-de-sécurité)
 - [Prérequis](#prérequis)
 - [Profils matériels et choix des modèles](#profils-matériels-et-choix-des-modèles)
@@ -280,6 +282,51 @@ dans `/app/data/models` et survit aux mises à jour.
 Tant que le modèle n'est pas téléchargé, `LLM_BACKEND=auto` laisse l'application en mode
 extractif ; elle bascule toute seule sur `llamacpp` dès que le fichier est présent.
 
+### Variante : rédaction déportée sur un PC (Ollama)
+
+Sur un DS218+, la recherche documentaire est instantanée, mais la **rédaction** de la
+réponse demande deux à trois minutes : le processeur doit relire tout le contexte avant
+d'écrire le premier mot, et un Celeron sans AVX plafonne à quelques GFLOPS. Ce n'est pas
+un défaut de réglage, c'est de l'arithmétique.
+
+D'où cette variante : le NAS garde ce qu'il fait bien — indexer, chercher, **filtrer
+selon les droits** — et confie la seule rédaction à un PC du réseau local.
+
+> **Ce qui sort du NAS** : la question et les trois extraits déjà sélectionnés
+> (1 à 3 Ko), rien d'autre. Le PC n'indexe rien, ne voit pas le système de fichiers et
+> ne contourne aucune permission : le filtrage ACL a déjà eu lieu, en amont.
+
+**Sur le PC** (Windows) :
+
+```powershell
+winget install Ollama.Ollama
+# Par défaut Ollama n'écoute que sur 127.0.0.1 : le NAS serait refusé.
+setx OLLAMA_HOST "0.0.0.0"
+# puis redémarrez Ollama pour que la variable soit prise en compte
+ollama pull qwen2.5:7b-instruct
+```
+
+Pensez à autoriser le port **11434** dans le pare-feu Windows pour le réseau privé.
+C'est, de loin, la cause n°1 d'échec.
+
+**Sur le NAS** : ⚙️ → *Modèles* → **Génération déportée**. L'adresse est pré-remplie avec
+l'IP de la machine depuis laquelle vous consultez l'interface. Le bouton **Tester** sonde
+Ollama **depuis le NAS** — le seul point de vue qui compte, car un Ollama joignable depuis
+votre navigateur ne l'est pas forcément depuis le conteneur.
+
+Le réglage est conservé dans `data/overrides.json` : il survit aux mises à jour et à la
+recréation du conteneur.
+
+Deux conséquences utiles :
+
+- **Repli automatique.** Le PC n'est pas toujours allumé. Avant chaque question,
+  l'application vérifie si Ollama répond ; sinon elle rebascule sur le modèle local du
+  NAS, sans intervention. Si la panne survient en cours de rédaction, le texte déjà
+  affiché est conservé tel quel — une réponse ne se réécrit jamais sous vos yeux.
+- **Contexte plus large.** Quand la rédaction part sur le PC, le NAS cesse de rationner
+  les extraits (1200 → 5000 caractères, 3 → 5 passages, historique plus long) : brider le
+  prompt n'aurait de sens que pour épargner un processeur qui ne travaille plus.
+
 ### Mettre à jour
 
 Reprenez **la même étiquette qu'au démarrage** : `:latest-llm` avec le LLM local,
@@ -299,6 +346,46 @@ Pour vérifier que la nouvelle image tourne réellement, ouvrez
 `http://<adresse-du-nas>:8083/api/health` : `build` porte l'empreinte du commit déployé
 et `uptime` repart de zéro. Le panneau ⚙️ → *Modèles* reflète lui aussi la version : si
 le modèle `nano` n'y figure pas, c'est que l'ancienne image tourne encore.
+
+### Mise à jour en un clic (`scripts/update.sh`)
+
+Pour éviter la séquence manuelle ci-dessus, le dépôt fournit `scripts/update.sh`. Il
+récupère l'image, redémarre la pile, **attend que le service réponde** et compare
+l'empreinte `build` avant/après : une mise à jour qui n'a pas pris est signalée comme un
+échec au lieu de passer inaperçue.
+
+Il suppose un `docker-compose.yml` déposé à côté de lui :
+
+```bash
+sudo mkdir -p /volume1/docker/apps/syno-ia
+cd /volume1/docker/apps/syno-ia
+# déposez-y docker-compose.yml, .env et scripts/update.sh
+sudo chmod +x update.sh
+sudo ./update.sh && tail -n 30 update.log
+```
+
+Puis **DSM → Panneau de configuration → Planificateur de tâches → Créer → Tâche
+planifiée → Script défini par l'utilisateur**, exécutée par `root` :
+
+```bash
+/volume1/docker/apps/syno-ia/update.sh
+```
+
+Dans l'onglet *Paramètres de la tâche*, cochez **« Envoyer les détails d'exécution par
+courriel »** et **« uniquement si le script se termine anormalement »** : c'est la façon
+documentée et fiable d'être prévenu, le script renvoyant un code non nul en cas d'échec.
+
+Quelques points à connaître :
+
+- Le script **possède la pile**. Ne créez pas en parallèle un *Projet* dans Container
+  Manager pointant sur le même dossier : Compose déduirait un second nom de projet et
+  vous vous retrouveriez avec deux piles concurrentes sur le même port. L'onglet
+  *Conteneurs* liste de toute façon le conteneur, quelle que soit son origine.
+- Container Manager installe Docker hors du `PATH` des tâches planifiées ; le script
+  cherche le binaire aux emplacements connus (`SYNO_IA_DOCKER` pour forcer un chemin).
+- Variables disponibles : `SYNO_IA_DIR`, `SYNO_IA_URL`, `SYNO_IA_WAIT`, `SYNO_IA_LOG`,
+  `SYNO_IA_PROJET`, `SYNO_IA_DOCKER`.
+- Le journal `update.log` est tourné automatiquement au-delà de 1 Mo.
 
 ### Variante sans aucun montage
 
@@ -498,16 +585,22 @@ téléchargé, un modèle déjà présent est utilisé en attendant.
 | `RETRIEVAL_TOP_K=3` | Moins d'extraits envoyés au modèle. |
 | `LLM_TIMEOUT_SECONDS=90` | Arrête la génération plus tôt et renvoie ce qui est prêt. |
 | `LLM_BACKEND=none` | Réponses extractives, instantanées. |
+| Case **« Répondre avec l'IA »** décochée | Même effet que `none`, mais décidé question par question, sans redémarrage. |
+| [Rédaction déportée](#variante--rédaction-déportée-sur-un-pc-ollama) | Le seul levier qui supprime vraiment l'attente. |
 
 Chaque réponse affiche le moteur réellement utilisé et le temps passé (total, premier jeton,
 jetons/seconde) : de quoi mesurer l'effet de ces réglages sans quitter l'interface.
 
-Au-delà de `LLM_TIMEOUT_SECONDS` (120 s par défaut), la génération est **arrêtée net** et
+Au-delà de `LLM_TIMEOUT_SECONDS` (600 s par défaut), la génération est **arrêtée net** et
 le texte déjà produit est conservé, accompagné d'un avertissement. Le NAS ne reste donc
 jamais bloqué sur une réponse interminable, et llama.cpp cesse aussitôt de consommer les
 cœurs. Si le délai expire **sans le moindre mot** — modèle trop lourd pour la machine —
 l'application bascule sur la réponse extractive et cite les passages trouvés : vous obtenez
 toujours quelque chose d'exploitable. `0` lève la limite.
+
+> Ce délai est volontairement large : sur un petit NAS, une réponse *finit* par arriver, et
+> mieux vaut l'attendre en étant prévenu que de la voir coupée à 120 s. C'est aussi
+> pourquoi la case « Répondre avec l'IA » existe — l'attente doit être choisie.
 
 #### Faire de la place
 
@@ -539,15 +632,21 @@ Fichier complet et commenté : [`.env.example`](.env.example). L'essentiel :
 | `EMBEDDING_ASYNC_LOAD` | `true` | Charge le modèle en arrière-plan (voir [Premier démarrage](#premier-démarrage)). `false` rend le démarrage bloquant. |
 | `EMBEDDING_BACKFILL_BATCH` | `64` | Fragments vectorisés par lot lors du rattrapage. |
 | `LLM_BACKEND` | `auto` | `auto`, `llamacpp`, `ollama`, `openai`, `none`. |
-| `LLM_TIMEOUT_SECONDS` | `120` | Délai maximal d'une génération ; au-delà, la réponse est tronquée proprement, ou remplacée par les extraits trouvés si aucun mot n'a été produit (`0` = sans limite). |
+| `LLM_TIMEOUT_SECONDS` | `600` | Délai maximal d'une génération ; au-delà, la réponse est tronquée proprement, ou remplacée par les extraits trouvés si aucun mot n'a été produit (`0` = sans limite). |
+| `LLM_BATCH_SIZE` | `512` | Jetons lus par passe pendant l'analyse du prompt. En dessous, la lecture dégénère en produits matrice-vecteur et devient 2 à 4 fois plus lente. À ne réduire qu'en cas de manque de mémoire. |
 | `LLM_THREADS` | `0` | Fils de calcul llama.cpp. `0` = automatique : **un cœur reste toujours libre** pour que le serveur continue de répondre pendant la génération. Ne montez à `cpu_count` qu'au prix de redémarrages intempestifs. |
-| `OLLAMA_URL` | `http://172.17.0.1:11434` | Ollama local ou distant. |
+| `OLLAMA_URL` | `http://172.17.0.1:11434` | Ollama local ou distant. Modifiable à chaud depuis ⚙️ → *Modèles*, le réglage étant alors conservé dans `data/overrides.json`. |
 | `OPENAI_API_KEY` | *(vide)* | Service compatible OpenAI. |
 | `HARDWARE_PROFILE` | `auto` | Forçage du profil (`nano`…`large`). |
 
 En mode `auto`, le LLM est choisi dans cet ordre : service compatible OpenAI (si une clé
 est présente) → Ollama (s'il répond) → `llama.cpp` local (si un modèle est présent) →
 **mode extractif**.
+
+Quand Ollama **et** un modèle local sont tous deux disponibles, les deux sont chaînés :
+Ollama rédige, et le modèle local prend le relais s'il ne répond plus. Les réglages
+enregistrés depuis l'administration (`data/overrides.json`) l'emportent sur les variables
+d'environnement correspondantes.
 
 ---
 
@@ -559,7 +658,25 @@ est présente) → Ollama (s'il répond) → `llama.cpp` local (si un modèle es
    cliquables qui ouvrent le document source. Sous chaque réponse figurent le moteur
    utilisé et les temps mesurés.
 4. Les administrateurs disposent d'un panneau (⚙️) : état du matériel, avancement de
-   l'indexation, téléchargement et suppression de modèles, sessions actives, reconnexion DSM.
+   l'indexation, téléchargement et suppression de modèles, génération déportée, sessions
+   actives, reconnexion DSM.
+
+### Répondre avec l'IA, ou simplement citer les documents
+
+Sous la zone de saisie, une case **« Répondre avec l'IA »** décide, question par question,
+de ce que l'application fait des passages trouvés :
+
+- **Décochée** — les extraits pertinents s'affichent aussitôt, avec leurs liens. La
+  recherche sémantique et le filtrage des droits ont bien eu lieu : seule la rédaction est
+  sautée. Sur un DS218+, c'est une réponse en moins d'une seconde.
+- **Cochée** — un modèle rédige une synthèse à partir de ces extraits. Comptez deux à trois
+  minutes sur un petit NAS, quelques secondes avec une [rédaction
+  déportée](#variante--rédaction-déportée-sur-un-pc-ollama).
+
+Sur les profils `nano` et `micro`, la case est **décochée par défaut** et signalée comme
+lente ; votre choix est ensuite mémorisé. Comme l'attente peut être longue, le navigateur
+propose d'envoyer une **notification** lorsque la réponse est prête : inutile de garder
+l'onglet sous les yeux.
 
 La première indexation d'un corpus de quelques milliers de documents prend de 20 minutes à
 plusieurs heures sur un DS218+. Elle est incrémentale : les exécutions suivantes ne
@@ -657,6 +774,8 @@ Choix techniques notables :
 | « Le serveur est injoignable » après une longue attente | La génération n'aboutissait pas et bloquait la requête | Mettez l'image à jour : le prompt est raccourci sur les CPU lents, et la génération s'arrête d'elle-même à `LLM_TIMEOUT_SECONDS` |
 | « Le serveur est injoignable » au bout d'une minute, le conteneur a redémarré | La génération occupait **tous** les cœurs : la sonde de santé n'était plus servie | Mettez l'image à jour (`docker pull ghcr.io/flake9025/syno-ia:latest-llm`) : un cœur est désormais réservé au serveur web |
 | Le modèle `nano` n'apparaît pas dans ⚙️ → *Modèles* | L'ancienne image tourne encore | Voir [Mettre à jour](#mettre-à-jour) — vérifiez l'étiquette `:latest-llm` et le champ `build` de `/api/health` |
+| Le bouton *Tester* ne joint pas Ollama, alors que `http://localhost:11434` marche sur le PC | Ollama n'écoute que sur `127.0.0.1` | `setx OLLAMA_HOST "0.0.0.0"`, **redémarrez Ollama**, puis ouvrez le port 11434 dans le pare-feu Windows pour le réseau privé |
+| La rédaction repart sur le NAS alors qu'Ollama est configuré | Le PC était éteint ou injoignable au moment de la question | C'est le repli voulu. Le moteur réellement utilisé est affiché sous chaque réponse et dans le bandeau |
 | Le chat n'affiche rien derrière un reverse proxy | Mise en tampon des réponses SSE | Désactivez le *buffering* dans la configuration du proxy |
 
 Journaux : `docker logs -f syno-ia`. État du service : `GET /api/health` (public, sans
@@ -675,6 +794,14 @@ aucune statistique d'index). Diagnostic complet, dont les compteurs d'indexation
 - Les sessions étant en mémoire, une mise à jour du conteneur déconnecte les utilisateurs.
 - Le RAG ne gère pas l'OCR : un PDF scanné sans couche texte ne sera pas indexé.
 - Les fichiers de plus de `INDEX_MAX_FILE_MB` (40 Mo par défaut) sont ignorés.
+- **La génération de texte sur un NAS d'entrée de gamme est lente, par construction.** Le
+  processeur doit relire tout le prompt avant d'écrire le premier mot : sur un Celeron sans
+  AVX, cela représente plusieurs centaines de milliards d'opérations, soit deux à trois
+  minutes. Aucun réglage ne contourne cette limite — seules la [rédaction
+  déportée](#variante--rédaction-déportée-sur-un-pc-ollama) ou les réponses extractives y
+  parviennent. La recherche, elle, reste instantanée sur ces machines.
+- Un Ollama distant est interrogé **en clair sur le réseau local** : question et extraits
+  transitent sans chiffrement. À réserver à un réseau de confiance.
 
 ---
 

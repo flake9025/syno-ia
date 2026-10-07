@@ -46,6 +46,26 @@ TIMEOUT_FALLBACK_NOTICE = (
     "Le modèle n'a rien produit dans le délai imparti : voici les passages trouvés."
 )
 
+#: Profils sur lesquels chaque jeton d'invite coûte cher : on envoie des consignes
+#: abrégées, qu'un très petit modèle suit de toute façon mieux qu'une longue liste.
+_PROFILS_COMPACTS = {"nano", "micro"}
+
+#: Moteurs qui rédigent sur une autre machine que le NAS.
+_MOTEURS_DISTANTS = {"ollama", "openai"}
+
+
+async def _generation_deportee(llm) -> bool:
+    """La prochaine réponse sera-t-elle rédigée ailleurs que sur le NAS ?
+
+    La question se pose avant la recherche, car elle décide de la longueur du
+    contexte que l'on va constituer.
+    """
+    if llm is None or not llm.available:
+        return False
+    sonde = getattr(llm, "redacteur", None)
+    moteur = await sonde() if sonde is not None else llm
+    return getattr(moteur, "name", "") in _MOTEURS_DISTANTS
+
 
 @dataclass
 class _Timing:
@@ -78,6 +98,10 @@ class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=MAX_QUESTION_LENGTH)
     history: list[dict] = Field(default_factory=list)
     top_k: int | None = Field(default=None, ge=1, le=20)
+    #: Rédiger une réponse avec le modèle, ou se contenter des passages trouvés.
+    #: Sur un NAS modeste la rédaction coûte des minutes, là où les extraits sont
+    #: immédiats : le choix appartient donc à l'utilisateur, question par question.
+    use_llm: bool = True
 
 
 def _sse(event: str, data: dict) -> str:
@@ -153,7 +177,7 @@ async def chat(
 
     def _engine() -> dict:
         """Identité du moteur qui va répondre, pour que l'utilisateur puisse la vérifier."""
-        if context.llm is not None and context.llm.available:
+        if context.llm is not None and context.llm.available and payload.use_llm:
             info = context.llm.describe()
             return {
                 "backend": info.get("backend", "?"),
@@ -166,8 +190,15 @@ async def chat(
     async def event_stream() -> AsyncIterator[str]:
         answer_parts: list[str] = []
         timing = _Timing()
+        deporte = payload.use_llm and await _generation_deportee(context.llm)
+        reglages = context.hardware.tuning(remote_generation=deporte)
         retrieval = asyncio.ensure_future(
-            context.pipeline.retrieve(session.dsm, question, top_k=payload.top_k)
+            context.pipeline.retrieve(
+                session.dsm,
+                question,
+                top_k=payload.top_k or reglages["retrieval_top_k"],
+                context_chars=reglages["context_max_chars"],
+            )
         )
         try:
             while True:
@@ -219,9 +250,25 @@ async def chat(
         budget = context.settings.llm_timeout_seconds
         deadline = time.monotonic() + budget if budget > 0 else None
         try:
-            if context.llm is not None and context.llm.available:
+            if context.llm is not None and context.llm.available and payload.use_llm:
                 messages = build_messages(
-                    question, result.context, language=language, history=payload.history
+                    question,
+                    result.context,
+                    language=language,
+                    history=payload.history,
+                    max_history=reglages["history_turns"],
+                    compact=not deporte and context.hardware.profile in _PROFILS_COMPACTS,
+                )
+                # Sur un petit processeur, la lecture du contexte précède le premier
+                # mot de plusieurs dizaines de secondes : le dire évite de croire
+                # que rien ne se passe.
+                yield _sse(
+                    "phase",
+                    {
+                        "phase": "reading",
+                        "excerpts": len(result.sources()),
+                        "chars": len(result.context),
+                    },
                 )
                 stream = context.llm.stream(
                     messages,

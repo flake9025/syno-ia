@@ -132,10 +132,21 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 700
     llm_context_size: int = 4096
     llm_threads: int = 0
+    #: Nombre de jetons du prompt traités d'un bloc. C'est le réglage qui pèse le
+    #: plus sur le délai avant le premier mot : en petits paquets, le processeur
+    #: enchaîne des multiplications matrice-vecteur qui exploitent mal son cache,
+    #: alors qu'un gros paquet devient une multiplication matrice-matrice, bien
+    #: plus efficace. 512 est la valeur de référence de llama.cpp ; ne la baisser
+    #: qu'en cas de manque de mémoire.
+    llm_batch_size: int = 512
     #: Délai maximal d'une génération, en secondes. Au-delà, la réponse est
     #: arrêtée net et ce qui a déjà été produit est renvoyé : mieux vaut un texte
     #: tronqué qu'une requête qui n'aboutit jamais. 0 désactive la limite.
-    llm_timeout_seconds: int = 120
+    #:
+    #: Large à dessein : sur un petit NAS, la lecture du contexte précède le
+    #: premier mot de plusieurs minutes. L'utilisateur qui coche « répondre avec
+    #: l'IA » accepte cette attente, et une notification le prévient à la fin.
+    llm_timeout_seconds: int = 600
 
     ollama_url: str = "http://172.17.0.1:11434"
     openai_base_url: str = "https://api.openai.com/v1"
@@ -177,4 +188,9 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     settings = Settings()
     settings.ensure_dirs()
+    # Les réglages choisis depuis l'administration priment sur l'environnement :
+    # sans quoi un redémarrage du conteneur les effacerait.
+    from .overrides import appliquer
+
+    appliquer(settings)
     return settings

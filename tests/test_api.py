@@ -395,6 +395,7 @@ class LLMMuet:
     """Moteur qui ne rend jamais la main : simule un NAS qui s'enlise."""
 
     available = True
+    name = "llamacpp"
 
     def describe(self) -> dict:
         return {"backend": "llamacpp", "model": "modele-lent.gguf"}
@@ -421,6 +422,23 @@ def test_delai_depasse_sans_jeton_bascule_en_extractif(client: TestClient):
     final = json.loads(corps.rsplit("data:", 1)[1].strip())
     assert final["engine"]["backend"] == "extractive"
     assert final["timing"]["truncated"] is False
+    assert final["answer"].strip()
+
+
+def test_sans_llm_la_reponse_est_immediate(client: TestClient):
+    """La case décochée doit court-circuiter la rédaction, pas l'attendre."""
+    connexion(client)
+    context = client.app.state.context
+    context.llm = LLMMuet()  # rendrait la main dans une heure si on l'appelait
+    context.settings.llm_timeout_seconds = 600
+
+    with client.stream(
+        "POST", "/api/chat", json={"question": "sauvegarde", "use_llm": False}
+    ) as response:
+        corps = "".join(response.iter_text())
+
+    final = json.loads(corps.rsplit("data:", 1)[1].strip())
+    assert final["engine"]["backend"] == "extractive"
     assert final["answer"].strip()
 
 
@@ -475,3 +493,60 @@ def test_suppression_modele_reservee_aux_admins(client: TestClient):
 
 def test_route_api_inconnue(client: TestClient):
     assert client.get("/api/inexistant").status_code == 404
+
+
+# ------------------------------------------------------- génération déportée
+def test_remote_llm_suggere_l_adresse_du_poste_consultant(client: TestClient):
+    """Le NAS voit l'IP du PC qui consulte : autant l'offrir toute prête."""
+    connexion(client, "admin")
+    payload = client.get(
+        "/api/admin/llm/remote", headers={"X-Forwarded-For": "192.168.1.42"}
+    ).json()
+    assert payload["suggested_url"] == "http://192.168.1.42:11434"
+
+
+def test_remote_llm_ne_suggere_rien_en_local(client: TestClient):
+    connexion(client, "admin")
+    payload = client.get(
+        "/api/admin/llm/remote", headers={"X-Forwarded-For": "127.0.0.1"}
+    ).json()
+    assert payload["suggested_url"] == ""
+
+
+def test_remote_llm_refuse_une_adresse_douteuse(client: TestClient):
+    connexion(client, "admin")
+    refus = client.post("/api/admin/llm/remote", json={"ollama_url": "file:///etc/passwd"})
+    assert refus.status_code == 400
+
+
+def test_remote_llm_persiste_le_reglage(client: TestClient):
+    """L'adresse doit survivre à la recréation du conteneur, donc sortir de l'image."""
+    connexion(client, "admin")
+    enregistre = client.post(
+        "/api/admin/llm/remote",
+        json={"ollama_url": "http://192.168.1.42:11434/", "llm_model": "qwen2.5:7b"},
+    )
+    assert enregistre.status_code == 200
+
+    settings = client.app.state.context.settings
+    assert settings.ollama_url == "http://192.168.1.42:11434"
+    assert json.loads((settings.data_dir / "overrides.json").read_text(encoding="utf-8")) == {
+        "ollama_url": "http://192.168.1.42:11434",
+        "llm_model": "qwen2.5:7b",
+    }
+
+
+def test_remote_llm_reserve_aux_admins(client: TestClient):
+    connexion(client)
+    assert client.get("/api/admin/llm/remote").status_code == 403
+    assert client.post("/api/admin/llm/remote", json={"ollama_url": ""}).status_code == 403
+
+
+def test_test_remote_signale_une_adresse_injoignable(client: TestClient):
+    connexion(client, "admin")
+    payload = client.post(
+        "/api/admin/llm/remote/test", json={"ollama_url": "http://127.0.0.1:1"}
+    ).json()
+    assert payload["reachable"] is False
+    assert "OLLAMA_HOST=0.0.0.0" in payload["detail"]
+

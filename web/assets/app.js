@@ -182,6 +182,23 @@ function renderEngineBadge() {
   if (totals) parts.push(`${totals.documents} doc · ${totals.chunks} extraits`);
   parts.push(llm, engine.profile);
   $('#engine-badge').textContent = parts.join(' · ');
+  syncLlmToggle(engine);
+}
+
+/* La rédaction par l'IA est lente sur un petit NAS, immédiate si elle est
+   déportée : la case reflète ce choix et garde la préférence de l'utilisateur. */
+function syncLlmToggle(engine) {
+  const boite = $('#use-llm');
+  if (!boite) return;
+
+  const sansMoteur = !engine || engine.llm === 'extractive';
+  boite.disabled = sansMoteur;
+  const lent = !sansMoteur && engine.llm === 'llamacpp'
+    && ['nano', 'micro'].includes(engine.profile);
+
+  const garde = localStorage.getItem('syno-ia.useLlm');
+  boite.checked = sansMoteur ? false : (garde === null ? !lent : garde === '1');
+  $('#use-llm-hint').textContent = lent ? t('app.useLlmSlow') : '';
 }
 
 async function loadDocuments(query = '') {
@@ -289,7 +306,11 @@ async function ask(question) {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, history: state.history.slice(-4) }),
+      body: JSON.stringify({
+        question,
+        history: state.history.slice(-4),
+        use_llm: $('#use-llm')?.checked !== false,
+      }),
       signal: state.controller.signal,
     });
     if (response.status === 401) { showLogin(); return; }
@@ -328,6 +349,12 @@ async function ask(question) {
           answer += payload.text;
           textNode.innerHTML = renderMarkdown(answer);
           scrollToBottom();
+        } else if (event === 'phase') {
+          // Sur un petit NAS, la lecture du contexte précède le premier mot de
+          // plusieurs dizaines de secondes : sans ce repère, l'attente semble figée.
+          if (!started && payload.phase === 'reading') {
+            textNode.textContent = t('app.reading', { n: payload.excerpts });
+          }
         } else if (event === 'notice') {
           toast(payload.message);
         } else if (event === 'error') {
@@ -338,6 +365,7 @@ async function ask(question) {
           textNode.innerHTML = renderMarkdown(answer);
           renderStats(status, payload.engine || engine, payload.timing);
           addMessageTools(assistant, answer);
+          notifyReady(question, askedAt);
         }
       }
     }
@@ -409,7 +437,11 @@ async function refreshAdmin() {
     renderOverview(status);
     renderProgress(status.indexing);
     if ($('.tab-panel[data-panel="models"]').classList.contains('active')) {
-      renderModels(await api('/api/admin/models'));
+      const [models, remote] = await Promise.all([
+        api('/api/admin/models'),
+        api('/api/admin/llm/remote'),
+      ]);
+      renderModels(models, remote);
     }
   } catch (exc) {
     console.warn('admin', exc);
@@ -492,7 +524,81 @@ function renderProgress(progress) {
   $('#index-errors').textContent = progress.last_error || '';
 }
 
-function renderModels(data) {
+/* Commandes d'installation d'Ollama, adaptées au poste qui consulte l'admin.
+   Une page web ne peut pas installer de logiciel : on fournit donc la commande
+   exacte à coller, et surtout le réglage qu'on oublie toujours — par défaut
+   Ollama n'écoute que sur 127.0.0.1 et refuse donc les appels du NAS. */
+function ollamaGuide() {
+  const ua = navigator.userAgent || '';
+  if (/Windows/i.test(ua)) {
+    return {
+      os: 'Windows',
+      url: 'https://ollama.com/download/windows',
+      install: 'winget install Ollama.Ollama',
+      expose: 'setx OLLAMA_HOST "0.0.0.0"   (puis fermez et rouvrez Ollama)',
+    };
+  }
+  if (/Mac OS X|Macintosh/i.test(ua)) {
+    return {
+      os: 'macOS',
+      url: 'https://ollama.com/download/mac',
+      install: 'brew install ollama',
+      expose: 'launchctl setenv OLLAMA_HOST 0.0.0.0   (puis relancez Ollama)',
+    };
+  }
+  return {
+    os: 'Linux',
+    url: 'https://ollama.com/download/linux',
+    install: 'curl -fsSL https://ollama.com/install.sh | sh',
+    expose: 'sudo systemctl edit ollama   →   Environment="OLLAMA_HOST=0.0.0.0"',
+  };
+}
+
+function renderRemote(remote) {
+  const guide = ollamaGuide();
+  const url = remote.ollama_url || remote.suggested_url || '';
+  const actif = Boolean(remote.ollama_url);
+  return `
+    <div class="remote-block">
+      <h3>${t('admin.remoteTitle')}</h3>
+      <p class="muted">${t('admin.remoteIntro')}</p>
+
+      <div class="remote-row">
+        <input type="text" id="ollama-url" value="${escapeHtml(url)}"
+               placeholder="http://192.168.1.10:11434" autocomplete="off">
+        <button class="btn small" id="ollama-test">${t('admin.remoteTest')}</button>
+      </div>
+      ${remote.suggested_url && !remote.ollama_url
+        ? `<p class="hint">${t('admin.remoteDetected').replace('{ip}', escapeHtml(remote.client_ip))}</p>`
+        : ''}
+
+      <div id="ollama-result" class="remote-result"></div>
+
+      <div class="remote-row">
+        <select id="ollama-model">
+          <option value="">${t('admin.remoteAuto')}</option>
+          ${remote.llm_model
+            ? `<option value="${escapeHtml(remote.llm_model)}" selected>${escapeHtml(remote.llm_model)}</option>`
+            : ''}
+        </select>
+        <button class="btn small primary" id="ollama-save">${t('admin.remoteSave')}</button>
+        ${actif ? `<button class="btn ghost small danger" id="ollama-clear">${t('admin.remoteDisable')}</button>` : ''}
+      </div>
+
+      <details class="remote-help">
+        <summary>${t('admin.remoteHelp').replace('{os}', guide.os)}</summary>
+        <ol>
+          <li>${t('admin.remoteStep1')} <a href="${guide.url}" target="_blank" rel="noopener">${guide.url}</a><br>
+              <code>${escapeHtml(guide.install)}</code></li>
+          <li><strong>${t('admin.remoteStep2')}</strong><br><code>${escapeHtml(guide.expose)}</code></li>
+          <li>${t('admin.remoteStep3')}<br><code>ollama pull qwen2.5:7b-instruct</code></li>
+          <li>${t('admin.remoteStep4')}</li>
+        </ol>
+      </details>
+    </div>`;
+}
+
+function renderModels(data, remote) {
   const download = data.download || {};
   $('#panel-models').innerHTML = `
     ${download.status === 'running' || download.status === 'done'
@@ -510,7 +616,78 @@ function renderModels(data) {
              <button class="btn ghost small danger" data-delete="${model.profile}"
                      title="${t('admin.deleteHint')}">${t('admin.delete')}</button>`
           : `<button class="btn small" data-download="${model.profile}">${t('admin.download')}</button>`}
-      </div>`).join('')}`;
+      </div>`).join('')}
+    ${remote ? renderRemote(remote) : ''}`;
+}
+
+/* ---------------------------------------------------------- Notification */
+/* Une réponse peut demander plusieurs minutes sur un petit NAS : prévenir
+   permet d'aller faire autre chose au lieu d'attendre devant l'écran. */
+function notifyReady(question, askedAt) {
+  const seconds = (Date.now() - askedAt) / 1000;
+  if (seconds < 20 || !document.hidden) return;
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  try {
+    const extrait = question.length > 60 ? `${question.slice(0, 60)}…` : question;
+    new Notification(t('app.readyTitle'), {
+      body: t('app.readyBody', { q: extrait }),
+      tag: 'syno-ia-answer',
+    });
+  } catch (exc) {
+    console.warn('notification', exc);
+  }
+}
+
+function askNotificationPermission() {
+  if (!('Notification' in window) || Notification.permission !== 'default') return;
+  Notification.requestPermission().catch(() => {});
+}
+
+/* ------------------------------------------------------- Génération déportée */
+async function testRemote() {
+  const champ = $('#ollama-url');
+  const zone = $('#ollama-result');
+  const bouton = $('#ollama-test');
+  zone.className = 'remote-result';
+  zone.textContent = t('admin.remoteTesting');
+  bouton.disabled = true;
+  try {
+    const result = await api('/api/admin/llm/remote/test', {
+      method: 'POST',
+      body: JSON.stringify({ ollama_url: champ.value.trim() }),
+    });
+    zone.className = `remote-result ${result.reachable ? 'ok' : 'ko'}`;
+    zone.textContent = result.detail;
+
+    const liste = $('#ollama-model');
+    const courant = liste.value;
+    liste.innerHTML = `<option value="">${t('admin.remoteAuto')}</option>`
+      + result.models.map((nom) =>
+        `<option value="${escapeHtml(nom)}"${nom === courant ? ' selected' : ''}>${escapeHtml(nom)}</option>`).join('');
+  } catch (exc) {
+    zone.className = 'remote-result ko';
+    zone.textContent = exc.message;
+  } finally {
+    bouton.disabled = false;
+  }
+}
+
+async function saveRemote(forced) {
+  const url = forced ? forced.url : $('#ollama-url').value.trim();
+  const model = forced ? forced.model : $('#ollama-model').value;
+  try {
+    await api('/api/admin/llm/remote', {
+      method: 'POST',
+      // On reste en « auto » : c'est ce mode qui garde le moteur local en repli
+      // quand le PC hébergeant Ollama est éteint.
+      body: JSON.stringify({ ollama_url: url, llm_model: model, llm_backend: 'auto' }),
+    });
+    toast(url ? t('admin.remoteSaved') : t('admin.remoteDisabled'));
+    await refreshAdmin();
+    await loadEngineBadge();
+  } catch (exc) {
+    toast(exc.message);
+  }
 }
 
 /* ------------------------------------------------------------------ Thème */
@@ -529,7 +706,12 @@ function bindEvents() {
     const question = field.value.trim();
     field.value = '';
     field.style.height = 'auto';
+    if ($('#use-llm')?.checked) askNotificationPermission();
     ask(question);
+  });
+
+  $('#use-llm')?.addEventListener('change', (event) => {
+    localStorage.setItem('syno-ia.useLlm', event.target.checked ? '1' : '0');
   });
 
   $('#question').addEventListener('keydown', (event) => {
@@ -599,6 +781,14 @@ function bindEvents() {
   $('#panel-models').addEventListener('click', async (event) => {
     const profile = event.target.dataset?.download;
     if (profile) { adminAction('/api/admin/models/download', { profile }); return; }
+
+    if (event.target.id === 'ollama-test') { await testRemote(); return; }
+    if (event.target.id === 'ollama-save') { await saveRemote(); return; }
+    if (event.target.id === 'ollama-clear') {
+      if (!confirm(t('admin.remoteDisableConfirm'))) return;
+      await saveRemote({ url: '', model: '' });
+      return;
+    }
 
     const removable = event.target.dataset?.delete;
     if (!removable) return;

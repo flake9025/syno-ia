@@ -25,6 +25,20 @@ Rules:
 - Answer in the language of the question, concisely and in a structured way.
 - Never mention documents that are not in the excerpts."""
 
+#: Consignes abrégées pour les très petits modèles.
+#:
+#: Chaque jeton d'invite doit être relu par le processeur avant le premier mot de
+#: la réponse : sur un NAS modeste, le préambule complet coûte à lui seul des
+#: dizaines de secondes. Un modèle de 350 M de paramètres suit de toute façon
+#: mieux trois consignes brèves qu'une liste de six.
+SYSTEM_PROMPT_COMPACT_FR = """Réponds uniquement à partir des EXTRAITS fournis.
+N'invente rien. Cite tes sources avec [1], [2].
+Si les extraits ne suffisent pas, dis-le."""
+
+SYSTEM_PROMPT_COMPACT_EN = """Answer only from the provided EXCERPTS.
+Invent nothing. Cite sources as [1], [2].
+If the excerpts are insufficient, say so."""
+
 NO_CONTEXT_FR = (
     "Aucun document accessible ne correspond à cette question. "
     "Vérifiez l'orthographe, essayez d'autres mots-clés, ou contactez "
@@ -36,8 +50,11 @@ NO_CONTEXT_EN = (
 )
 
 
-def system_prompt(language: str = "fr") -> str:
-    return SYSTEM_PROMPT_FR if language.lower().startswith("fr") else SYSTEM_PROMPT_EN
+def system_prompt(language: str = "fr", *, compact: bool = False) -> str:
+    francais = language.lower().startswith("fr")
+    if compact:
+        return SYSTEM_PROMPT_COMPACT_FR if francais else SYSTEM_PROMPT_COMPACT_EN
+    return SYSTEM_PROMPT_FR if francais else SYSTEM_PROMPT_EN
 
 
 def no_context_message(language: str = "fr") -> str:
@@ -51,15 +68,23 @@ def build_messages(
     language: str = "fr",
     history: list[dict] | None = None,
     max_history: int = 4,
+    compact: bool = False,
 ) -> list[dict]:
-    """Assemble la conversation : système, historique récent, puis extraits + question."""
-    messages: list[dict] = [{"role": "system", "content": system_prompt(language)}]
+    """Assemble la conversation : système, historique récent, puis extraits + question.
 
-    for entry in (history or [])[-max_history:]:
+    `max_history` et `compact` servent le même objectif : limiter le nombre de
+    jetons que le modèle doit relire avant d'écrire. Sur un petit processeur, ce
+    volume se paie directement en secondes d'attente.
+    """
+    messages: list[dict] = [{"role": "system", "content": system_prompt(language, compact=compact)}]
+
+    # Un tour d'historique trop long coûterait plus cher que les extraits eux-mêmes.
+    taille_tour = 400 if compact else 2000
+    for entry in (history or [])[-max_history:] if max_history > 0 else []:
         role = entry.get("role")
         content = (entry.get("content") or "").strip()
         if role in {"user", "assistant"} and content:
-            messages.append({"role": role, "content": content[:2000]})
+            messages.append({"role": role, "content": content[:taille_tour]})
 
     if language.lower().startswith("fr"):
         user_block = (

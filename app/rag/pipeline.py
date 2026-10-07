@@ -67,6 +67,7 @@ class RetrievalPipeline:
         question: str,
         *,
         top_k: int | None = None,
+        context_chars: int | None = None,
     ) -> RetrievalResult:
         question = (question or "").strip()
         if not question:
@@ -98,7 +99,7 @@ class RetrievalPipeline:
             return RetrievalResult([], "", 0, 0, not semantic)
 
         authorized, denied = await self._authorize(session, fused, top_k)
-        context = self._build_context(authorized)
+        context = self._build_context(authorized, context_chars or self.context_max_chars)
         return RetrievalResult(
             hits=authorized,
             context=context,
@@ -140,7 +141,8 @@ class RetrievalPipeline:
                     denied += 1
         return selected, denied
 
-    def _build_context(self, hits: list[SearchHit]) -> str:
+    def _build_context(self, hits: list[SearchHit], max_chars: int | None = None) -> str:
+        budget = max_chars or self.context_max_chars
         blocks: list[str] = []
         used = 0
         for index, hit in enumerate(hits, start=1):
@@ -149,7 +151,7 @@ class RetrievalPipeline:
                 header += f" — {hit.location}"
             header += f" ({hit.dsm_path})"
             body = hit.text.strip()
-            remaining = self.context_max_chars - used
+            remaining = budget - used
             if remaining <= 200:
                 break
             if len(body) > remaining:

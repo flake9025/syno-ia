@@ -1,8 +1,11 @@
 services:
   syno-ia:
-    # Image publiée par l'intégration continue.
-    # Variante avec LLM local embarqué : ghcr.io/flake9025/syno-ia:latest-llm
-    image: ghcr.io/flake9025/syno-ia:latest
+    # Étiquette pilotée par SYNO_IA_TAG dans .env, afin qu'une mise à jour ne
+    # puisse pas basculer par erreur sur l'autre variante :
+    #   latest-llm → avec llama.cpp compilé sans AVX (LLM 100 % local)
+    #   latest     → image allégée, sans LLM local (mode extractif ou distant)
+    # La variante « -llm » est un sur-ensemble : elle convient dans tous les cas.
+    image: ghcr.io/flake9025/syno-ia:${SYNO_IA_TAG:-latest-llm}
     # Pour construire localement à la place :
     # build:
     #   context: .
@@ -33,12 +36,9 @@ services:
       - /volume1/homes:/volume1/homes:ro
       # - /volume1/documents:/volume1/documents:ro
       # - /volume1/projets:/volume1/projets:ro
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
-      interval: 30s
-      timeout: 10s
-      start_period: 180s
-      retries: 5
+    # Pas de `healthcheck` ici : celui de l'image fait foi (voir Dockerfile).
+    # Le redéfinir à deux endroits a déjà conduit à une sonde plus stricte que
+    # prévu, donc à des redémarrages en pleine réponse.
     # Le DS218+ n'a que 2 cœurs : on laisse de l'air à DSM.
     cpus: 1.5
     mem_limit: 5g

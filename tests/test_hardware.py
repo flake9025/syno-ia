@@ -100,6 +100,29 @@ def test_le_prompt_suit_le_processeur_pas_la_memoire():
     assert lent.tuning()["context_max_chars"] <= 2000
 
 
+def test_une_generation_deportee_desserre_le_prompt():
+    """Brider le contexte n'a de sens que si c'est le NAS qui relit le prompt.
+
+    Quand la rédaction part sur un PC, rationner les extraits appauvrirait la
+    réponse pour épargner un processeur qui ne travaille plus.
+    """
+    lent = profile(cpu=2, ram=6800, flags=["sse4_2"], total=8192)
+
+    local = lent.tuning()
+    deporte = lent.tuning(remote_generation=True)
+
+    assert deporte["context_max_chars"] > local["context_max_chars"]
+    assert deporte["history_turns"] > local["history_turns"]
+    assert deporte["retrieval_top_k"] > local["retrieval_top_k"]
+    # La recherche, elle, reste à la charge du NAS : inutile de l'alourdir.
+    assert deporte["retrieval_candidates"] == local["retrieval_candidates"]
+
+
+def test_une_machine_deja_genereuse_nest_pas_rabaissee():
+    rapide = profile(cpu=8, ram=16000, flags=["sse4_2", "avx", "avx2"], total=16000)
+    assert rapide.tuning(remote_generation=True) == rapide.tuning()
+
+
 def test_la_tolerance_profite_aux_processeurs_accelerés():
     """Le même déséquilibre mémoire/CPU donne un cran de plus avec AVX."""
     hardware = profile(cpu=2, ram=6800, flags=["sse4_2", "avx"], total=8192)

@@ -111,15 +111,53 @@ EMBEDDING_BY_PROFILE: dict[str, tuple[str, str]] = {
 }
 
 #: Paramètres de récupération ajustés au profil.
+#:
+#: `context_max_chars` est le réglage le plus coûteux sur un petit processeur :
+#: le modèle doit *lire* tout ce contexte avant d'écrire son premier mot, et ce
+#: temps croît linéairement avec sa longueur. `history_turns` obéit à la même
+#: logique — chaque tour rappelé rallonge d'autant l'attente.
 TUNING_BY_PROFILE: dict[str, dict[str, int]] = {
-    "nano": {"retrieval_candidates": 30, "retrieval_top_k": 3, "context_max_chars": 2000},
-    "micro": {"retrieval_candidates": 40, "retrieval_top_k": 4, "context_max_chars": 3500},
-    "small": {"retrieval_candidates": 60, "retrieval_top_k": 5, "context_max_chars": 5000},
-    "medium": {"retrieval_candidates": 80, "retrieval_top_k": 6, "context_max_chars": 7000},
-    "large": {"retrieval_candidates": 120, "retrieval_top_k": 8, "context_max_chars": 10000},
+    "nano": {
+        "retrieval_candidates": 30,
+        "retrieval_top_k": 3,
+        "context_max_chars": 1200,
+        "history_turns": 2,
+    },
+    "micro": {
+        "retrieval_candidates": 40,
+        "retrieval_top_k": 4,
+        "context_max_chars": 3000,
+        "history_turns": 2,
+    },
+    "small": {
+        "retrieval_candidates": 60,
+        "retrieval_top_k": 5,
+        "context_max_chars": 5000,
+        "history_turns": 4,
+    },
+    "medium": {
+        "retrieval_candidates": 80,
+        "retrieval_top_k": 6,
+        "context_max_chars": 7000,
+        "history_turns": 4,
+    },
+    "large": {
+        "retrieval_candidates": 120,
+        "retrieval_top_k": 8,
+        "context_max_chars": 10000,
+        "history_turns": 6,
+    },
 }
 
 _INTERESTING_FLAGS = {"avx", "avx2", "avx512f", "fma", "f16c", "sse4_2", "neon", "asimd"}
+
+#: Ordre croissant de générosité des profils.
+ORDRE_PROFILS = ("nano", "micro", "small", "medium", "large")
+
+#: Profil de prompt retenu lorsque la rédaction part sur une autre machine.
+#: Le NAS continue de chercher dans ses documents, mais il n'a plus de raison de
+#: rationner le contexte : ce n'est plus lui qui le relira.
+PROFIL_GENERATION_DEPORTEE = "small"
 
 
 @dataclass
@@ -189,15 +227,37 @@ class HardwareProfile:
     def embedding_choice(self) -> tuple[str, str]:
         return EMBEDDING_BY_PROFILE.get(self.embedding_profile, EMBEDDING_BY_PROFILE["micro"])
 
-    def tuning(self) -> dict[str, int]:
+    def tuning(self, *, remote_generation: bool = False) -> dict[str, int]:
         """Taille du prompt : elle suit le **profil de génération**, pas la mémoire.
 
         Un prompt doit être relu par le processeur avant le premier mot de la
         réponse. Sur une machine à la mémoire confortable mais au CPU lent — un
         DS218+ et ses 8 Go, par exemple — un contexte de 7000 caractères coûtait
         plusieurs minutes d'attente avant le moindre jeton.
+
+        Quand la rédaction est confiée à un Ollama distant, ce raisonnement ne
+        tient plus : brider le prompt reviendrait à appauvrir la réponse pour
+        épargner un processeur qui ne travaille pas. On relève alors les seules
+        valeurs qui façonnent le prompt, en laissant `retrieval_candidates` au
+        profil du NAS puisque la recherche, elle, reste à sa charge.
         """
-        return TUNING_BY_PROFILE.get(self.profile, TUNING_BY_PROFILE["micro"])
+        reglages = TUNING_BY_PROFILE.get(self.profile, TUNING_BY_PROFILE["micro"])
+        if not remote_generation:
+            return reglages
+
+        rang_actuel = (
+            ORDRE_PROFILS.index(self.profile) if self.profile in ORDRE_PROFILS else 1
+        )
+        if rang_actuel >= ORDRE_PROFILS.index(PROFIL_GENERATION_DEPORTEE):
+            return reglages
+
+        genereux = TUNING_BY_PROFILE[PROFIL_GENERATION_DEPORTEE]
+        return {
+            **reglages,
+            "retrieval_top_k": genereux["retrieval_top_k"],
+            "context_max_chars": genereux["context_max_chars"],
+            "history_turns": genereux["history_turns"],
+        }
 
     def recommended_threads(self) -> int:
         """Laisse **toujours** un cœur libre au serveur web.
