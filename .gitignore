@@ -35,3 +35,9 @@ Thumbs.db
 # Les PDF « File Station API » / « Login API » appartiennent à Synology :
 # on ne les redistribue pas, on les télécharge depuis le site de l'éditeur.
 _syno_docs/
+
+# --- Scripts de déploiement personnels ---
+# Ils portent le nom du compte administrateur du NAS, le chemin de la clé SSH
+# et la topologie des volumes : rien qui doive se retrouver dans un dépôt
+# public. Chacun garde le sien en local, sur sa machine et sur son NAS.
+deploy/

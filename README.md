@@ -29,7 +29,6 @@ ne peut pas remonter dans les réponses.*
 - [Installation sur le NAS](#installation-sur-le-nas)
   - [Rédaction déportée sur un PC (Ollama)](#variante--rédaction-déportée-sur-un-pc-ollama)
   - [Mise à jour en un clic](#mise-à-jour-en-un-clic-scriptsupdatesh)
-  - [Déploiement automatique à chaque commit](#déploiement-automatique-à-chaque-commit-deploydeploy-nassh)
 - [Modèle de sécurité](#modèle-de-sécurité)
 - [Prérequis](#prérequis)
 - [Profils matériels et choix des modèles](#profils-matériels-et-choix-des-modèles)
@@ -422,43 +421,6 @@ Quelques points à connaître :
 - Variables disponibles : `SYNO_IA_DIR`, `SYNO_IA_URL`, `SYNO_IA_WAIT`, `SYNO_IA_LOG`,
   `SYNO_IA_PROJET`, `SYNO_IA_DOCKER`.
 - Le journal `update.log` est tourné automatiquement au-delà de 1 Mo.
-
-### Déploiement automatique à chaque commit (`deploy/deploy-nas.sh`)
-
-Si vous publiez vos propres images, le workflow GitHub Actions appelle le webhook
-`NAS_WEBHOOK_URL` (secret du dépôt) une fois les images poussées sur GHCR. Côté NAS,
-`deploy/deploy-nas.sh` fait le reste.
-
-Contrairement à `update.sh`, il est **autonome** : ni dépôt git, ni `docker-compose.yml`
-nécessaires sur le NAS. Toute la configuration tient dans le script et dans `.env`.
-
-```bash
-sudo mkdir -p /volume1/docker/deploy
-# déposez-y deploy-nas.sh, puis :
-sudo chmod +x /volume1/docker/deploy/deploy-nas.sh
-sudo SYNO_IA_SSH=0 /volume1/docker/deploy/deploy-nas.sh    # essai en direct
-```
-
-Ce qu'il garantit :
-
-- Il **échoue vraiment** quand le déploiement échoue : `/api/health` répond `200` dès le
-  début du démarrage avec `{"status":"starting"}`, le script attend donc `"status":"ok"`.
-  Si le conteneur meurt, il affiche ses 50 dernières lignes et s'arrête aussitôt.
-- Un partage absent du NAS est **signalé et ignoré** plutôt que monté : Docker créerait
-  sinon un dossier vide appartenant à `root`, et l'indexation ne trouverait rien.
-- Le plafond CPU est un vrai plafond (`--cpus`), condition pour que la sonde de santé
-  reste servie pendant une génération — voir [Limites connues](#limites-connues).
-- Un éventuel jeton GHCR passe par l'entrée standard de `ssh`, jamais en argument : il
-  n'apparaît donc pas dans la sortie de `ps`.
-
-Variables disponibles : `SYNO_IA_TAG`, `SYNO_IA_SHARES`, `SYNO_IA_PORT`, `SYNO_IA_DIR`,
-`SYNO_IA_CPUS`, `SYNO_IA_MEMORY`, `SYNO_IA_WAIT`, `SYNO_IA_LOG`, `SYNO_IA_DOCKER`,
-`SYNO_IA_SSH` (`0` désactive le détour SSH), `SYNO_IA_SSH_USER`, `SYNO_IA_SSH_HOST`,
-`SYNO_IA_SSH_KEY`, `GHCR_USER`, `GHCR_TOKEN`.
-
-> **Choisissez un seul des deux scripts.** `update.sh` pilote Compose, `deploy-nas.sh`
-> pilote `docker run`, et tous deux nomment le conteneur `syno-ia` : utilisés ensemble,
-> chacun détruit le conteneur de l'autre.
 
 ### Variante sans aucun montage
 
